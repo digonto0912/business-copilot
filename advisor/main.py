@@ -176,6 +176,42 @@ if "critic_results" not in st.session_state:
 
 
 # ============================================================
+# MEMORY / EXECUTION STATE
+# ============================================================
+
+if "runtime" not in st.session_state:
+    st.session_state.runtime = 0
+
+
+if "auto_runtime" not in st.session_state:
+    st.session_state.auto_runtime = 0
+
+
+if "problem_stack" not in st.session_state:
+    st.session_state.problem_stack = []
+
+
+if "current_problem_index" not in st.session_state:
+    st.session_state.current_problem_index = 0
+
+
+if "critic_id_counter" not in st.session_state:
+    st.session_state.critic_id_counter = 0
+
+
+if "critic_records" not in st.session_state:
+    st.session_state.critic_records = []
+
+
+if "active_critics" not in st.session_state:
+    st.session_state.active_critics = []
+
+
+if "max_problem_depth" not in st.session_state:
+    st.session_state.max_problem_depth = 3
+
+
+# ============================================================
 # TITLE
 # ============================================================
 
@@ -198,6 +234,20 @@ left, right = st.columns(
 
 with left:
     st.subheader("💬 Chat")
+
+    # --------------------------------------------------------
+    # PROBLEM DEPTH CONTROL
+    # --------------------------------------------------------
+
+    st.number_input(
+        "Maximum Problem Depth",
+        min_value=0,
+        max_value=20,
+        value=st.session_state.max_problem_depth,
+        step=1,
+        key="max_problem_depth",
+        help=("Maximum recursive depth allowed for child problems."),
+    )
 
     # --------------------------------------------------------
     # CHAT HISTORY
@@ -252,6 +302,17 @@ with left:
                 user_input = user_input.strip()
 
                 # --------------------------------------------
+                # USER STARTS A NEW RUNTIME
+                # --------------------------------------------
+
+                st.session_state.runtime += 1
+
+                # A human-started flow always starts
+                # with auto_runtime = 0.
+
+                st.session_state.auto_runtime = 0
+
+                # --------------------------------------------
                 # SAVE USER MESSAGE
                 # --------------------------------------------
 
@@ -277,20 +338,19 @@ with left:
                     )
 
                 # --------------------------------------------
-                # RUN AI WORKFLOW
-                # --------------------------------------------
-                #
-                # Pass previously saved verified facts into
-                # workflow.
-                #
-                # The workflow then adds the CURRENT verified
-                # facts before running the critic.
-                #
+                # RUN WORKFLOW
                 # --------------------------------------------
 
                 result = run_workflow(
                     history,
                     verified_facts_memory=(st.session_state.verified_facts),
+                    runtime=(st.session_state.runtime),
+                    auto_runtime=(st.session_state.auto_runtime),
+                    problem_stack=(st.session_state.problem_stack),
+                    current_problem_index=(st.session_state.current_problem_index),
+                    critic_id_counter=(st.session_state.critic_id_counter),
+                    active_critics=(st.session_state.active_critics),
+                    max_problem_depth=(st.session_state.max_problem_depth),
                 )
 
                 # --------------------------------------------
@@ -305,7 +365,7 @@ with left:
                 )
 
                 # --------------------------------------------
-                # SAVE DEBUG LOGS
+                # SAVE AGENT LOGS
                 # --------------------------------------------
 
                 st.session_state.agent_logs.extend(result["logs"])
@@ -325,6 +385,37 @@ with left:
 
                 if result["critic_results"]:
                     st.session_state.critic_results.extend(result["critic_results"])
+
+                # --------------------------------------------
+                # SAVE CRITIC RECORDS
+                # --------------------------------------------
+
+                if result["critic_records"]:
+                    st.session_state.critic_records.extend(result["critic_records"])
+
+                # --------------------------------------------
+                # SAVE ACTIVE CRITICS
+                # --------------------------------------------
+
+                st.session_state.active_critics = result["active_critics"]
+
+                # --------------------------------------------
+                # SAVE PROBLEM STACK
+                # --------------------------------------------
+
+                st.session_state.problem_stack = result["problem_stack"]
+
+                # --------------------------------------------
+                # SAVE CURRENT PROBLEM INDEX
+                # --------------------------------------------
+
+                st.session_state.current_problem_index = result["current_problem_index"]
+
+                # --------------------------------------------
+                # SAVE CRITIC ID COUNTER
+                # --------------------------------------------
+
+                st.session_state.critic_id_counter = result["critic_id_counter"]
 
                 # --------------------------------------------
                 # UPDATE INPUT STATE
@@ -371,7 +462,13 @@ with right:
                 latest = index == len(st.session_state.agent_logs) - 1
 
                 with st.expander(
-                    f"{icon} {log['agent']}",
+                    (
+                        f"{icon} "
+                        f"runtime={log.get('runtime')} "
+                        f"auto={log.get('auto_runtime')} "
+                        f"problem={log.get('problem_id')} "
+                        f"| {log['agent']}"
+                    ),
                     expanded=latest,
                 ):
                     # ----------------------------------------
@@ -404,7 +501,7 @@ with right:
 
                     elif isinstance(
                         log["prompt"],
-                        (dict, list),
+                        dict,
                     ):
                         st.code(
                             json.dumps(
@@ -495,17 +592,130 @@ with right:
             )
 
     # ========================================================
-    # CLEAR LOGS
+    # PROBLEM STACK
     # ========================================================
 
     if st.button(
-        "🗑️ Clear Logs",
+        "🧩 Show Problem Stack",
         use_container_width=True,
     ):
+        with st.expander(
+            "Problem Stack — Raw JSON",
+            expanded=True,
+        ):
+            st.code(
+                json.dumps(
+                    {
+                        "current_problem_index": (
+                            st.session_state.current_problem_index
+                        ),
+                        "stack": (st.session_state.problem_stack),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                language="json",
+            )
+
+    # ========================================================
+    # CRITIC RECORDS
+    # ========================================================
+
+    if st.button(
+        "🧾 Show Critic Records",
+        use_container_width=True,
+    ):
+        with st.expander(
+            "Critic Records — Raw JSON",
+            expanded=True,
+        ):
+            st.code(
+                json.dumps(
+                    st.session_state.critic_records,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                language="json",
+            )
+
+    # ========================================================
+    # ACTIVE CRITICS
+    # ========================================================
+
+    if st.button(
+        "⚠️ Show Active Critics",
+        use_container_width=True,
+    ):
+        with st.expander(
+            "Active Critics — Raw JSON",
+            expanded=True,
+        ):
+            st.code(
+                json.dumps(
+                    st.session_state.active_critics,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                language="json",
+            )
+
+    # ========================================================
+    # EXECUTION STATE
+    # ========================================================
+
+    if st.button(
+        "📊 Show Execution State",
+        use_container_width=True,
+    ):
+        with st.expander(
+            "Execution State — Raw JSON",
+            expanded=True,
+        ):
+            st.code(
+                json.dumps(
+                    {
+                        "runtime": st.session_state.runtime,
+                        "auto_runtime": st.session_state.auto_runtime,
+                        "current_problem_index": st.session_state.current_problem_index,
+                        "max_problem_depth": st.session_state.max_problem_depth,
+                        "critic_id_counter": st.session_state.critic_id_counter,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                language="json",
+            )
+
+    # ========================================================
+    # CLEAR EVERYTHING
+    # ========================================================
+
+    if st.button(
+        "🗑️ Clear All Memory",
+        use_container_width=True,
+    ):
+        st.session_state.messages = []
+
+        st.session_state.needs_input = True
+
         st.session_state.agent_logs = []
 
         st.session_state.verified_facts = []
 
         st.session_state.critic_results = []
+
+        st.session_state.runtime = 0
+
+        st.session_state.auto_runtime = 0
+
+        st.session_state.problem_stack = []
+
+        st.session_state.current_problem_index = 0
+
+        st.session_state.critic_id_counter = 0
+
+        st.session_state.critic_records = []
+
+        st.session_state.active_critics = []
 
         st.rerun()

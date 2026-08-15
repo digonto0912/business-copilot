@@ -11,6 +11,7 @@ from agents import (
     classifier_agent,
     verified_facts_agent,
     systematic_advice_converter,
+    CriticAgent,
 )
 
 from schemas.verified_facts_schema import VerifiedFacts
@@ -36,25 +37,14 @@ classifier_chain = classifier_agent | StrOutputParser()
 verified_facts_chain = verified_facts_agent | verified_facts_parser
 
 
+systematic_advice_converter_chain = systematic_advice_converter
+
+
 # ============================================================
-# SYSTEMATIC ADVICE CONVERTER
-# ============================================================
-#
-# systematic_advice_converter already contains:
-#
-#     prompt
-#        ↓
-#     structured_llm
-#
-# where structured_llm uses:
-#
-#     BusinessStrategyBrief
-#
-# Therefore we do NOT add another parser here.
-#
+# CRITIC
 # ============================================================
 
-systematic_advice_converter_chain = systematic_advice_converter
+critic_agent = CriticAgent()
 
 
 # ============================================================
@@ -147,7 +137,10 @@ class LLMDebugHandler(BaseCallbackHandler):
 # ============================================================
 
 
-def run_workflow(history):
+def run_workflow(
+    history,
+    verified_facts_memory=None,
+):
     """
     Complete workflow:
 
@@ -173,6 +166,8 @@ def run_workflow(history):
                     Converter
                        ↓
              BusinessStrategyBrief
+                       ↓
+             one critic run per action
     """
 
     # ========================================================
@@ -267,23 +262,13 @@ def run_workflow(history):
     needs_input = "NEEDS_INPUT" in classification
 
     # ========================================================
-    # 6. SYSTEMATIC ADVICE CONVERTER
-    # ========================================================
-    #
-    # ONLY run this when the classifier determines that
-    # the advisor has enough information.
-    #
-    # The converter receives the final advisor response,
-    # NOT the whole conversation.
-    #
-    # Its output is already a BusinessStrategyBrief
-    # Pydantic object because systematic_advice_converter
-    # uses with_structured_output().
-    #
+    # 6. SYSTEMATIC ADVICE
     # ========================================================
 
     systematic_advice = None
+
     systematic_advice_debug = None
+
     systematic_advice_status = None
 
     if not needs_input:
@@ -304,7 +289,94 @@ def run_workflow(history):
             systematic_advice_debug.llm_output = {"error": str(e)}
 
     # ========================================================
-    # 7. DEBUG LOGS
+    # 7. BUILD VERIFIED CONTEXT FOR CRITIC
+    # ========================================================
+    #
+    # Existing verified facts from previous turns are supplied
+    # by main.py.
+    #
+    # The CURRENT verified-facts result is also added so the
+    # critic has the latest information.
+    #
+    # ========================================================
+
+    critic_verified_context = []
+
+    if verified_facts_memory:
+        critic_verified_context.extend(verified_facts_memory)
+
+    if verified_facts is not None:
+        critic_verified_context.append(verified_facts.model_dump())
+
+    # ========================================================
+    # 8. CRITIC
+    # ========================================================
+
+    critic_results = []
+
+    critic_status = "SKIPPED"
+
+    if not needs_input and systematic_advice is not None:
+        critic_status = "SUCCESS"
+
+        advisor_strategy = systematic_advice.model_dump()
+
+        all_actions = advisor_strategy.get("prioritized_action_plan", [])
+
+        # ----------------------------------------------------
+        # ONE ACTION AT A TIME
+        # ----------------------------------------------------
+        #
+        # The critic receives:
+        #
+        # verified_context
+        # +
+        # advisor strategy context
+        # +
+        # ONLY ONE target action
+        #
+        # It does NOT receive the other actions.
+        #
+        # ----------------------------------------------------
+
+        for action_item in all_actions:
+            target_strategy = {
+                key: value
+                for key, value in (advisor_strategy.items())
+                if key != ("prioritized_action_plan")
+            }
+
+            target_strategy["prioritized_action_plan"] = [action_item]
+
+            try:
+                critique = critic_agent.critique_action(
+                    action_item=action_item,
+                    verified_context=(critic_verified_context),
+                    advisor_strategy=(target_strategy),
+                )
+
+                critic_results.append(
+                    {
+                        "action": action_item,
+                        "critique": (critique.model_dump()),
+                        "status": "SUCCESS",
+                    }
+                )
+
+            except Exception as e:
+                critic_status = "ERROR"
+
+                critic_results.append(
+                    {
+                        "action": action_item,
+                        "critique": None,
+                        "status": "ERROR",
+                        "error": str(e),
+                    }
+                )
+
+    # ========================================================
+    # 9. DEBUG LOGS
     # ========================================================
 
     logs = [
@@ -329,7 +401,7 @@ def run_workflow(history):
     ]
 
     # --------------------------------------------------------
-    # Add converter log only when it actually ran
+    # SYSTEMATIC ADVICE LOG
     # --------------------------------------------------------
 
     if systematic_advice_debug is not None:
@@ -342,8 +414,41 @@ def run_workflow(history):
             }
         )
 
+    # --------------------------------------------------------
+    # CRITIC LOG
+    # --------------------------------------------------------
+    #
+    # CriticAgent currently owns its internal tool-loop, so
+    # this log stores the structured result instead of claiming
+    # to be the exact provider prompt.
+    #
+    # --------------------------------------------------------
+
+    for index, critic_result in enumerate(
+        critic_results,
+        start=1,
+    ):
+        logs.append(
+            {
+                "agent": f"Reality-Check Critic #{index}",
+                "prompt": {
+                    "verified_context": critic_verified_context,
+                    "advisor_strategy": {
+                        key: value
+                        for key, value in (systematic_advice.model_dump().items())
+                        if key != ("prioritized_action_plan")
+                    }
+                    if systematic_advice is not None
+                    else None,
+                    "target_action": critic_result["action"],
+                },
+                "output": critic_result["critique"],
+                "status": critic_result["status"],
+            }
+        )
+
     # ========================================================
-    # 8. RETURN WORKFLOW RESULT
+    # 10. RETURN
     # ========================================================
 
     return {
@@ -352,5 +457,6 @@ def run_workflow(history):
         "needs_input": needs_input,
         "verified_facts": verified_facts,
         "systematic_advice": systematic_advice,
+        "critic_results": critic_results,
         "logs": logs,
     }

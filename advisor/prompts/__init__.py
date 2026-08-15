@@ -2,3 +2,4 @@ from .advisor_prompt import get_advisor_prompt
 from .classifier_prompt import get_classifier_prompt
 from .verified_facts_prompt import get_verified_facts_prompt
 from .systematic_advice_converter_prompt import get_systematic_advice_converter_prompt
+from .critic_prompt import get_critic_prompt

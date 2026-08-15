@@ -32,18 +32,14 @@ st.markdown(
     body,
     [data-testid="stAppViewContainer"],
     [data-testid="stApp"] {
-
-
     }
 
 
     [data-testid="stAppViewContainer"] > .main {
-
     }
 
 
     .block-container {
-
 
         padding-top: 0.5rem !important;
         padding-bottom: 0.5rem !important;
@@ -60,9 +56,7 @@ st.markdown(
 
     [data-testid="stHorizontalBlock"] {
 
-
         min-height: 0 !important;
-
 
         align-items: stretch !important;
     }
@@ -140,7 +134,6 @@ st.markdown(
 
         word-break: break-word !important;
 
-
         max-width: 100% !important;
     }
 
@@ -178,6 +171,10 @@ if "verified_facts" not in st.session_state:
     st.session_state.verified_facts = []
 
 
+if "critic_results" not in st.session_state:
+    st.session_state.critic_results = []
+
+
 # ============================================================
 # TITLE
 # ============================================================
@@ -200,7 +197,6 @@ left, right = st.columns(
 # ============================================================
 
 with left:
-
     st.subheader("💬 Chat")
 
     # --------------------------------------------------------
@@ -213,39 +209,24 @@ with left:
     )
 
     with chat_box:
-
         if not st.session_state.messages:
-
-            st.info(
-                "Tell me about your business to begin."
-            )
+            st.info("Tell me about your business to begin.")
 
         else:
-
             for message in st.session_state.messages:
-
                 if message["role"] == "user":
-
                     with st.chat_message("user"):
-
-                        st.write(
-                            message["content"]
-                        )
+                        st.write(message["content"])
 
                 else:
-
                     with st.chat_message("assistant"):
-
-                        st.write(
-                            message["content"]
-                        )
+                        st.write(message["content"])
 
     # --------------------------------------------------------
     # INPUT
     # --------------------------------------------------------
 
     if st.session_state.needs_input:
-
         user_input = st.text_area(
             "Message",
             placeholder="Tell me about your business...",
@@ -264,20 +245,15 @@ with left:
         # ----------------------------------------------------
 
         if send:
-
             if not user_input.strip():
-
-                st.warning(
-                    "Please enter a message."
-                )
+                st.warning("Please enter a message.")
 
             else:
-
                 user_input = user_input.strip()
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # SAVE USER MESSAGE
-                # ------------------------------------------------
+                # --------------------------------------------
 
                 st.session_state.messages.append(
                     {
@@ -286,14 +262,13 @@ with left:
                     }
                 )
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # BUILD HISTORY
-                # ------------------------------------------------
+                # --------------------------------------------
 
                 history = []
 
                 for message in st.session_state.messages:
-
                     history.append(
                         (
                             message["role"],
@@ -301,15 +276,26 @@ with left:
                         )
                     )
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # RUN AI WORKFLOW
-                # ------------------------------------------------
+                # --------------------------------------------
+                #
+                # Pass previously saved verified facts into
+                # workflow.
+                #
+                # The workflow then adds the CURRENT verified
+                # facts before running the critic.
+                #
+                # --------------------------------------------
 
-                result = run_workflow(history)
+                result = run_workflow(
+                    history,
+                    verified_facts_memory=(st.session_state.verified_facts),
+                )
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # SAVE ASSISTANT RESPONSE
-                # ------------------------------------------------
+                # --------------------------------------------
 
                 st.session_state.messages.append(
                     {
@@ -318,51 +304,42 @@ with left:
                     }
                 )
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # SAVE DEBUG LOGS
-                # ------------------------------------------------
+                # --------------------------------------------
 
-                st.session_state.agent_logs.extend(
-                    result["logs"]
-                )
+                st.session_state.agent_logs.extend(result["logs"])
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # SAVE VERIFIED FACTS
-                # ------------------------------------------------
-                #
-                # verified_facts is a Pydantic object.
-                # Convert it into plain Python data before
-                # storing it in session state.
-                #
-                # Every workflow execution gets its own entry.
-                #
-                # ------------------------------------------------
+                # --------------------------------------------
 
                 if result["verified_facts"] is not None:
-
                     st.session_state.verified_facts.append(
                         result["verified_facts"].model_dump()
                     )
 
-                # ------------------------------------------------
+                # --------------------------------------------
+                # SAVE CRITIC RESULTS
+                # --------------------------------------------
+
+                if result["critic_results"]:
+                    st.session_state.critic_results.extend(result["critic_results"])
+
+                # --------------------------------------------
                 # UPDATE INPUT STATE
-                # ------------------------------------------------
+                # --------------------------------------------
 
-                st.session_state.needs_input = (
-                    result["needs_input"]
-                )
+                st.session_state.needs_input = result["needs_input"]
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # RERUN
-                # ------------------------------------------------
+                # --------------------------------------------
 
                 st.rerun()
 
     else:
-
-        st.success(
-            "The advisor has enough information."
-        )
+        st.success("The advisor has enough information.")
 
 
 # ============================================================
@@ -370,12 +347,9 @@ with left:
 # ============================================================
 
 with right:
-
     st.subheader("🔍 Agent Debug")
 
-    st.caption(
-        "Actual LLM input → raw LLM output"
-    )
+    st.caption("Actual LLM input → raw LLM output")
 
     # --------------------------------------------------------
     # DEBUG HISTORY
@@ -387,50 +361,30 @@ with right:
     )
 
     with debug_box:
-
         if not st.session_state.agent_logs:
-
-            st.info(
-                "No agent activity yet."
-            )
+            st.info("No agent activity yet.")
 
         else:
+            for index, log in enumerate(st.session_state.agent_logs):
+                icon = "🟢" if log["status"] == "SUCCESS" else "🔴"
 
-            for index, log in enumerate(
-                st.session_state.agent_logs
-            ):
-
-                icon = (
-                    "🟢"
-                    if log["status"] == "SUCCESS"
-                    else "🔴"
-                )
-
-                latest = (
-                    index
-                    == len(st.session_state.agent_logs) - 1
-                )
+                latest = index == len(st.session_state.agent_logs) - 1
 
                 with st.expander(
                     f"{icon} {log['agent']}",
                     expanded=latest,
                 ):
-
-                    # --------------------------------------------
+                    # ----------------------------------------
                     # PROMPT
-                    # --------------------------------------------
+                    # ----------------------------------------
 
-                    st.markdown(
-                        "### 📥 Prompt sent to LLM"
-                    )
+                    st.markdown("### 📥 Prompt sent to LLM")
 
                     if isinstance(
                         log["prompt"],
                         list,
                     ):
-
                         for message in log["prompt"]:
-
                             role = message.get(
                                 "role",
                                 "unknown",
@@ -441,35 +395,42 @@ with right:
                                 "",
                             )
 
-                            st.markdown(
-                                f"**{role.upper()}**"
-                            )
+                            st.markdown(f"**{role.upper()}**")
 
                             st.code(
                                 content,
                                 language="text",
                             )
 
-                    else:
+                    elif isinstance(
+                        log["prompt"],
+                        (dict, list),
+                    ):
+                        st.code(
+                            json.dumps(
+                                log["prompt"],
+                                indent=2,
+                                ensure_ascii=False,
+                            ),
+                            language="json",
+                        )
 
+                    else:
                         st.code(
                             str(log["prompt"]),
                             language="text",
                         )
 
-                    # --------------------------------------------
+                    # ----------------------------------------
                     # RAW OUTPUT
-                    # --------------------------------------------
+                    # ----------------------------------------
 
-                    st.markdown(
-                        "### 📤 Raw LLM Response"
-                    )
+                    st.markdown("### 📤 Raw LLM Response")
 
                     if isinstance(
                         log["output"],
                         (dict, list),
                     ):
-
                         st.code(
                             json.dumps(
                                 log["output"],
@@ -480,19 +441,16 @@ with right:
                         )
 
                     else:
-
                         st.code(
                             str(log["output"]),
                             language="text",
                         )
 
-                    # --------------------------------------------
+                    # ----------------------------------------
                     # STATUS
-                    # --------------------------------------------
+                    # ----------------------------------------
 
-                    st.write(
-                        f"Status: {log['status']}"
-                    )
+                    st.write(f"Status: {log['status']}")
 
     # ========================================================
     # VERIFIED FACTS
@@ -502,12 +460,10 @@ with right:
         "🧠 Show Verified Facts",
         use_container_width=True,
     ):
-
         with st.expander(
             "Verified Facts — Raw JSON",
             expanded=True,
         ):
-
             st.code(
                 json.dumps(
                     st.session_state.verified_facts,
@@ -517,17 +473,39 @@ with right:
                 language="json",
             )
 
-    # --------------------------------------------------------
+    # ========================================================
+    # CRITIC RESULTS
+    # ========================================================
+
+    if st.button(
+        "🔍 Show Critic Results",
+        use_container_width=True,
+    ):
+        with st.expander(
+            "Critic Results — Raw JSON",
+            expanded=True,
+        ):
+            st.code(
+                json.dumps(
+                    st.session_state.critic_results,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                language="json",
+            )
+
+    # ========================================================
     # CLEAR LOGS
-    # --------------------------------------------------------
+    # ========================================================
 
     if st.button(
         "🗑️ Clear Logs",
         use_container_width=True,
     ):
-
         st.session_state.agent_logs = []
 
         st.session_state.verified_facts = []
+
+        st.session_state.critic_results = []
 
         st.rerun()

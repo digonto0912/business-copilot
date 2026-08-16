@@ -3,7 +3,7 @@ import json
 import streamlit as st
 import dotenv
 
-from agent_workflow import run_workflow
+from recursion_workflow import run_workflow
 
 
 dotenv.load_dotenv()
@@ -548,6 +548,14 @@ with right:
                     # ----------------------------------------
 
                     st.write(f"Status: {log['status']}")
+
+
+    # ========================================================
+    # DOWNLOAD FULL SESSION
+    # ========================================================
+
+    st.download_button("⬇️ Download Full Session", json.dumps({k: v for k, v in st.session_state.items()}, indent=2, ensure_ascii=False, default=str), "full_session.json", "application/json", use_container_width=True)
+
 
     # ========================================================
     # VERIFIED FACTS

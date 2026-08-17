@@ -267,21 +267,21 @@ def run_workflow(
 
         identifier_result = identifier["result"]
 
-        all_logs.append(
-            {
-                "agent": "Problem Identifier",
-                "runtime": runtime,
-                "auto_runtime": current_auto_runtime,
-                "problem_id": (
-                    problem_stack[current_problem_index]["problem_id"]
-                    if problem_stack
-                    else None
-                ),
-                "prompt": identifier["debug"].llm_prompt,
-                "output": identifier["debug"].llm_output,
-                "status": identifier["status"],
-            }
-        )
+        identifier_log = {
+            "agent": "Problem Identifier",
+            "runtime": runtime,
+            "auto_runtime": current_auto_runtime,
+            "problem_id": (
+                problem_stack[current_problem_index]["problem_id"]
+                if problem_stack
+                else None
+            ),
+            "prompt": identifier["debug"].llm_prompt,
+            "output": identifier["debug"].llm_output,
+            "status": identifier["status"],
+        }
+
+        all_logs.append(identifier_log)
 
         # ----------------------------------------------------
         # CREATE ROOT PROBLEM
@@ -307,6 +307,9 @@ def run_workflow(
             problem_stack.append(root_problem)
 
             current_problem_index = 0
+
+            # Link the debug record to the problem created by this exact call.
+            identifier_log["problem_id"] = root_problem["problem_id"]
 
     # ========================================================
     # RECURSION LOOP
@@ -521,17 +524,17 @@ def run_workflow(
             # SAVE EXPLAINER LOG
             # -----------------------------------------------
 
-            all_logs.append(
-                {
-                    "agent": "Problem Explainer",
-                    "runtime": runtime,
-                    "auto_runtime": current_auto_runtime,
-                    "problem_id": current_problem_id,
-                    "prompt": explainer["debug"].llm_prompt,
-                    "output": explainer["debug"].llm_output,
-                    "status": explainer["status"],
-                }
-            )
+            explainer_log = {
+                "agent": "Problem Explainer",
+                "runtime": runtime,
+                "auto_runtime": current_auto_runtime,
+                "problem_id": current_problem_id,
+                "prompt": explainer["debug"].llm_prompt,
+                "output": explainer["debug"].llm_output,
+                "status": explainer["status"],
+            }
+
+            all_logs.append(explainer_log)
 
             explainer_result = explainer["result"]
 
@@ -592,13 +595,21 @@ def run_workflow(
                 "parent_problem_id": current_problem_id,
                 "depth": new_depth,
                 "problem": explainer_result.problem,
+                # This raw problem record is created by the Problem
+                # Explainer call above, so it keeps that exact call's
+                # execution metadata. The automatic Advisor call advances
+                # auto_runtime separately below.
                 "runtime": runtime,
-                "auto_runtime": current_auto_runtime + 1,
+                "auto_runtime": current_auto_runtime,
                 "agent": "Advisor",
                 "status": "ACTIVE",
                 "solution": None,
                 "source_critic_id": conditional["critic_id"],
             }
+
+            # Link the debug record to the child problem created by this
+            # exact Problem Explainer call.
+            explainer_log["problem_id"] = new_problem_id
 
             # Parent waits.
 

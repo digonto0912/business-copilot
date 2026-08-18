@@ -187,12 +187,8 @@ if "auto_runtime" not in st.session_state:
     st.session_state.auto_runtime = 0
 
 
-if "problem_stack" not in st.session_state:
-    st.session_state.problem_stack = []
-
-
-if "current_problem_index" not in st.session_state:
-    st.session_state.current_problem_index = 0
+if "problem_tree" not in st.session_state:
+    st.session_state.problem_tree = []
 
 
 if "critic_id_counter" not in st.session_state:
@@ -346,8 +342,7 @@ with left:
                     verified_facts_memory=(st.session_state.verified_facts),
                     runtime=(st.session_state.runtime),
                     auto_runtime=(st.session_state.auto_runtime),
-                    problem_stack=(st.session_state.problem_stack),
-                    current_problem_index=(st.session_state.current_problem_index),
+                    problem_tree=(st.session_state.problem_tree),
                     critic_id_counter=(st.session_state.critic_id_counter),
                     active_critics=(st.session_state.active_critics),
                     max_problem_depth=(st.session_state.max_problem_depth),
@@ -400,16 +395,10 @@ with left:
                 st.session_state.active_critics = result["active_critics"]
 
                 # --------------------------------------------
-                # SAVE PROBLEM STACK
+                # SAVE PROBLEM TREE
                 # --------------------------------------------
 
-                st.session_state.problem_stack = result["problem_stack"]
-
-                # --------------------------------------------
-                # SAVE CURRENT PROBLEM INDEX
-                # --------------------------------------------
-
-                st.session_state.current_problem_index = result["current_problem_index"]
+                st.session_state.problem_tree = result["problem_tree"]
 
                 # --------------------------------------------
                 # SAVE CRITIC ID COUNTER
@@ -604,21 +593,16 @@ with right:
     # ========================================================
 
     if st.button(
-        "🧩 Show Problem Stack",
+        "🌳 Show Problem Tree",
         use_container_width=True,
     ):
         with st.expander(
-            "Problem Stack — Raw JSON",
+            "Problem Tree — Raw JSON",
             expanded=True,
         ):
             st.code(
                 json.dumps(
-                    {
-                        "current_problem_index": (
-                            st.session_state.current_problem_index
-                        ),
-                        "stack": (st.session_state.problem_stack),
-                    },
+                    st.session_state.problem_tree,
                     indent=2,
                     ensure_ascii=False,
                 ),
@@ -684,7 +668,6 @@ with right:
                     {
                         "runtime": st.session_state.runtime,
                         "auto_runtime": st.session_state.auto_runtime,
-                        "current_problem_index": st.session_state.current_problem_index,
                         "max_problem_depth": st.session_state.max_problem_depth,
                         "critic_id_counter": st.session_state.critic_id_counter,
                     },
@@ -716,9 +699,7 @@ with right:
 
         st.session_state.auto_runtime = 0
 
-        st.session_state.problem_stack = []
-
-        st.session_state.current_problem_index = 0
+        st.session_state.problem_tree = []
 
         st.session_state.critic_id_counter = 0
 

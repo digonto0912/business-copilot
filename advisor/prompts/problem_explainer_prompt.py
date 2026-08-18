@@ -4,7 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate
 PROBLEM_EXPLAINER_PROMPT = """
 You are a Problem Explainer.
 
-Your job is to examine a conditional critic result and determine
+Your job is to examine a critic result and determine
 whether it represents a DISTINCT NEW PROBLEM that should be sent
 back to the advisor as a child problem.
 
@@ -23,7 +23,7 @@ You receive:
 1. CURRENT_PROBLEM
    The problem currently being solved.
 
-2. CONDITIONAL_CRITIC
+2. CRITIC
    The critic's analysis of one action from the advisor's strategy.
 
 3. VERIFIED_FACTS
@@ -36,7 +36,7 @@ NEW PROBLEM TEST
 Create NEW_PROBLEM only when the critic reveals a distinct issue
 that requires its own reasoning and solution.
 
-A conditional critic does NOT automatically create a new problem.
+A PASS, FAIL, or CONDITIONAL critic result does NOT automatically create a new problem.
 
 Do NOT create a new problem when the critic is only saying:
 
@@ -103,7 +103,7 @@ CURRENT_PROBLEM:
 {current_problem}
 
 
-CONDITIONAL_CRITIC:
+CRITIC:
 
 {conditional_critic}
 

@@ -1,182 +1,234 @@
 # recursion_workflow.py
 
 import json
+from collections import deque
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from agent_workflow import (
-    run_core_workflow,
-)
-
-from agents import (
-    problem_identifier_agent,
-    problem_explainer_agent,
-)
-
-
-# ============================================================
-# LLM DEBUG CALLBACK
-# ============================================================
+from agent_workflow import run_core_workflow
+from agents import problem_identifier_agent, problem_explainer_agent
 
 
 class RecursionDebugHandler(BaseCallbackHandler):
-    """
-    Captures Problem Identifier /
-    Problem Explainer prompts and outputs.
-    """
+    """Captures Problem Identifier / Problem Explainer prompts and outputs."""
 
     def __init__(self):
-
         self.llm_prompt = None
         self.llm_output = None
 
-    def on_chat_model_start(
-        self,
-        serialized,
-        messages,
-        **kwargs,
-    ):
-
+    def on_chat_model_start(self, serialized, messages, **kwargs):
         try:
             prompt_messages = []
-
             for batch in messages:
                 for message in batch:
                     prompt_messages.append(
                         {
-                            "role": getattr(
-                                message,
-                                "type",
-                                "unknown",
-                            ),
+                            "role": getattr(message, "type", "unknown"),
                             "content": message.content,
                         }
                     )
-
             self.llm_prompt = prompt_messages
-
         except Exception as e:
             self.llm_prompt = {"error": str(e)}
 
-    def on_llm_end(
-        self,
-        response,
-        **kwargs,
-    ):
-
+    def on_llm_end(self, response, **kwargs):
         try:
             generation = response.generations[0][0]
-
-            if hasattr(
-                generation,
-                "message",
-            ):
+            if hasattr(generation, "message"):
                 message = generation.message
-
                 self.llm_output = {
-                    "role": getattr(
-                        message,
-                        "type",
-                        "ai",
-                    ),
+                    "role": getattr(message, "type", "ai"),
                     "content": message.content,
                 }
-
             else:
                 self.llm_output = {
                     "role": "ai",
                     "content": str(generation.text),
                 }
-
         except Exception as e:
             self.llm_output = {"error": str(e)}
 
 
-# ============================================================
-# PROBLEM IDENTIFIER
-# ============================================================
-
-
-def identify_problem(
-    user_input,
-):
-
+def identify_problem(user_input):
     debug = RecursionDebugHandler()
-
     try:
         result = problem_identifier_agent.with_config(callbacks=[debug]).invoke(
             {"user_input": user_input}
         )
-
-        return {
-            "result": result,
-            "debug": debug,
-            "status": "SUCCESS",
-        }
-
+        return {"result": result, "debug": debug, "status": "SUCCESS"}
     except Exception as e:
         debug.llm_output = {"error": str(e)}
-
-        return {
-            "result": None,
-            "debug": debug,
-            "status": "ERROR",
-        }
+        return {"result": None, "debug": debug, "status": "ERROR"}
 
 
-# ============================================================
-# PROBLEM EXPLAINER
-# ============================================================
-
-
-def explain_problem(
-    current_problem,
-    conditional_critic,
-    verified_facts,
-):
-
+def explain_problem(current_problem, conditional_critic, verified_facts):
     debug = RecursionDebugHandler()
-
     try:
         result = problem_explainer_agent.with_config(callbacks=[debug]).invoke(
             {
                 "current_problem": json.dumps(
-                    current_problem,
-                    indent=2,
-                    ensure_ascii=False,
+                    current_problem, indent=2, ensure_ascii=False
                 ),
                 "conditional_critic": json.dumps(
-                    conditional_critic,
-                    indent=2,
-                    ensure_ascii=False,
+                    conditional_critic, indent=2, ensure_ascii=False
                 ),
                 "verified_facts": json.dumps(
-                    verified_facts,
-                    indent=2,
-                    ensure_ascii=False,
+                    verified_facts, indent=2, ensure_ascii=False
                 ),
             }
         )
-
-        return {
-            "result": result,
-            "debug": debug,
-            "status": "SUCCESS",
-        }
-
+        return {"result": result, "debug": debug, "status": "SUCCESS"}
     except Exception as e:
         debug.llm_output = {"error": str(e)}
+        return {"result": None, "debug": debug, "status": "ERROR"}
 
-        return {
-            "result": None,
-            "debug": debug,
-            "status": "ERROR",
+
+def _next_problem_id(problem_tree):
+    ids = []
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        if isinstance(node.get("problem_id"), int):
+            ids.append(node["problem_id"])
+        for action in node.get("action_plans", []):
+            child = action.get("new_problem")
+            if child:
+                walk(child)
+
+    for root in problem_tree:
+        walk(root)
+
+    return max(ids, default=-1) + 1
+
+
+def _find_problem(problem_tree, problem_id):
+    found = None
+
+    def walk(node):
+        nonlocal found
+        if found is not None or not isinstance(node, dict):
+            return
+        if node.get("problem_id") == problem_id:
+            found = node
+            return
+        for action in node.get("action_plans", []):
+            child = action.get("new_problem")
+            if child:
+                walk(child)
+
+    for root in problem_tree:
+        walk(root)
+
+    return found
+
+
+def _build_problem_node(
+    problem_id,
+    parent_problem_id,
+    depth,
+    problem,
+    runtime,
+    auto_runtime,
+    source_critic_id=None,
+):
+    return {
+        "problem_id": problem_id,
+        "parent_problem_id": parent_problem_id,
+        "depth": depth,
+        "problem": problem,
+        "runtime": runtime,
+        "auto_runtime": auto_runtime,
+        "agent": "Advisor",
+        "status": "ACTIVE",
+        "solution": None,
+        "source_critic_id": source_critic_id,
+        "action_plans": [],
+    }
+
+
+def _automatic_problem_history(base_history, child_problem, source_critic, verified_facts):
+    payload = (
+        "AUTOMATIC PROBLEM-SOLVING REQUEST\n\n"
+        "NEW PROBLEM:\n"
+        + child_problem["problem"]
+        + "\n\nSOURCE CRITIC:\n"
+        + json.dumps(source_critic, indent=2, ensure_ascii=False)
+        + "\n\nFULL VERIFIED FACTS:\n"
+        + json.dumps(verified_facts, indent=2, ensure_ascii=False)
+    )
+
+    child_history = list(base_history)
+    child_history.append(("user", payload))
+    return child_history
+
+
+def _attach_action_plans(
+    current_problem,
+    advisor_strategy,
+    critic_results,
+    explainer_results,
+    runtime,
+    auto_runtime,
+):
+    """Attach every action, its critic verdict, and explainer result to the problem node."""
+
+    explain_by_critic = {item["critic_id"]: item for item in explainer_results}
+
+    current_problem["action_plans"] = []
+
+    for critic_result in critic_results:
+        critic_id = critic_result["critic_id"]
+        action_item = critic_result.get("action")
+        critique = critic_result.get("critique") or {}
+
+        action_node = {
+            "action_plan": action_item,
+            "critic_id": critic_id,
+            "runtime": runtime,
+            "auto_runtime": auto_runtime,
+            "verdict": critique.get("verdict") if isinstance(critique, dict) else None,
+            "verdict_reason": (
+                critique.get("verdict_reason")
+                if isinstance(critique, dict)
+                else None
+            ),
+            "new_problem": None,
         }
 
+        explainer = explain_by_critic.get(critic_id)
+        if explainer is not None:
+            result = explainer.get("result")
+            if result is not None:
+                action_node["new_problem"] = explainer.get("new_problem")
+                action_node["new_problem_classification"] = result.classification
+                action_node["new_problem_reason"] = result.reason
+            else:
+                action_node["new_problem_classification"] = None
+                action_node["new_problem_reason"] = None
 
-# ============================================================
-# RECURSIVE ARCHITECTURAL FLOW
-# ============================================================
+        current_problem["action_plans"].append(action_node)
+
+
+def _max_auto_runtime(problem_tree):
+    maximum = 0
+
+    def walk(node):
+        nonlocal maximum
+        if not isinstance(node, dict):
+            return
+        value = node.get("auto_runtime")
+        if isinstance(value, int):
+            maximum = max(maximum, value)
+        for action in node.get("action_plans", []):
+            child = action.get("new_problem")
+            if child:
+                walk(child)
+
+    for root in problem_tree:
+        walk(root)
+
+    return maximum
 
 
 def run_workflow(
@@ -184,520 +236,368 @@ def run_workflow(
     verified_facts_memory=None,
     runtime=1,
     auto_runtime=0,
-    problem_stack=None,
-    current_problem_index=0,
+    problem_tree=None,
     critic_id_counter=0,
     active_critics=None,
     max_problem_depth=3,
+    # Kept only for compatibility with older callers. It is not used for traversal.
+    problem_stack=None,
+    current_problem_index=0,
 ):
     """
-    Controls the recursive architecture.
+    BFS orchestration around the existing agent pipeline.
 
-    It does NOT implement the core agent pipeline itself.
+    Existing agents remain intact:
+        Problem Identifier -> Advisor -> Verified Facts -> Classifier
+        -> Systematic Advice Converter -> ALL Critics -> ALL Problem Explainers
+        -> queue discovered child problems -> Advisor serially, breadth-first.
 
-    It controls:
-
-        runtime
-        auto_runtime
-        problem stack
-        current problem
-        Problem Identifier
-        Problem Explainer
-        child creation
-        depth limit
-        automatic re-entry
-        child completion
-        parent restoration
+    The critical invariant is that no child problem is sent to Advisor until
+    every critic and every Problem Explainer for the current problem has finished.
     """
-
-    # ========================================================
-    # NORMALIZE
-    # ========================================================
 
     if verified_facts_memory is None:
         verified_facts_memory = []
-
-    if problem_stack is None:
-        problem_stack = []
-
     if active_critics is None:
         active_critics = []
 
-    # ========================================================
-    # MEMORY
-    # ========================================================
+    # Migrate the old stack only as input compatibility; all new traversal is tree-based.
+    if problem_tree is None:
+        problem_tree = []
+        if problem_stack:
+            # Preserve the existing root/problem objects as much as possible.
+            # Nested legacy stack nodes are flattened into roots only for migration.
+            problem_tree.extend(problem_stack)
+            for node in problem_tree:
+                node.setdefault("action_plans", [])
 
     all_logs = []
-
     all_critic_results = []
-
     all_critic_records = []
-
     all_child_problems = []
 
-    # ========================================================
-    # FLOW VARIABLES
-    # ========================================================
-
+    current_verified_facts = list(verified_facts_memory)
     current_auto_runtime = auto_runtime
+    next_auto_runtime = max(current_auto_runtime, _max_auto_runtime(problem_tree))
 
-    current_history = list(history)
-
-    # ========================================================
-    # HUMAN FLOW
-    # ========================================================
-
+    # ------------------------------------------------------------
+    # Initial user turn: identify/create the root problem.
+    # ------------------------------------------------------------
     human_user_messages = [content for role, content in history if role == "user"]
-
     latest_user_input = human_user_messages[-1] if human_user_messages else ""
 
-    # ========================================================
-    # PROBLEM IDENTIFIER
-    # ========================================================
-    #
-    # Only the initial human-started flow gets Problem
-    # Identifier.
-    #
-    # Automatic child flows already have their problem.
-    #
-    # ========================================================
-
-    if current_auto_runtime == 0:
+    if not problem_tree and current_auto_runtime == 0:
         identifier = identify_problem(latest_user_input)
-
         identifier_result = identifier["result"]
 
-        identifier_log = {
-            "agent": "Problem Identifier",
-            "runtime": runtime,
-            "auto_runtime": current_auto_runtime,
-            "problem_id": (
-                problem_stack[current_problem_index]["problem_id"]
-                if problem_stack
-                else None
-            ),
-            "prompt": identifier["debug"].llm_prompt,
-            "output": identifier["debug"].llm_output,
-            "status": identifier["status"],
-        }
-
-        all_logs.append(identifier_log)
-
-        # ----------------------------------------------------
-        # CREATE ROOT PROBLEM
-        # ----------------------------------------------------
+        all_logs.append(
+            {
+                "agent": "Problem Identifier",
+                "runtime": runtime,
+                "auto_runtime": current_auto_runtime,
+                "problem_id": None,
+                "prompt": identifier["debug"].llm_prompt,
+                "output": identifier["debug"].llm_output,
+                "status": identifier["status"],
+            }
+        )
 
         if (
             identifier_result is not None
             and identifier_result.classification == "PROBLEM"
-            and not problem_stack
         ):
-            root_problem = {
-                "problem_id": 0,
-                "parent_problem_id": None,
-                "depth": 0,
-                "problem": identifier_result.problem,
-                "runtime": runtime,
-                "auto_runtime": 0,
-                "agent": "Advisor",
-                "status": "ACTIVE",
-                "solution": None,
-            }
+            root_problem = _build_problem_node(
+                problem_id=0,
+                parent_problem_id=None,
+                depth=0,
+                problem=identifier_result.problem,
+                runtime=runtime,
+                auto_runtime=0,
+            )
+            problem_tree.append(root_problem)
 
-            problem_stack.append(root_problem)
+    if not problem_tree:
+        return {
+            "response": "",
+            "classification": None,
+            "needs_input": True,
+            "verified_facts": None,
+            "systematic_advice": None,
+            "critic_results": [],
+            "critic_records": [],
+            "active_critics": active_critics,
+            "logs": all_logs,
+            "problem_tree": problem_tree,
+            "problem_stack": problem_tree,
+            "current_problem_index": 0,
+            "critic_id_counter": critic_id_counter,
+            "verified_facts_memory": current_verified_facts,
+            "auto_runtime": current_auto_runtime,
+            "child_problems": all_child_problems,
+        }
 
-            current_problem_index = 0
+    # ------------------------------------------------------------
+    # BFS queue.
+    # Root is processed first. Children discovered from one complete
+    # level are appended after ALL explainers of that level finish.
+    # ------------------------------------------------------------
+    queue = deque()
+    root = problem_tree[0]
 
-            # Link the debug record to the problem created by this exact call.
-            identifier_log["problem_id"] = root_problem["problem_id"]
+    # If root already has a completed solution, this call is normally a continuation.
+    queue.append((root, list(history)))
 
-    # ========================================================
-    # RECURSION LOOP
-    # ========================================================
-    #
-    # The core pipeline executes one complete flow.
-    #
-    # If a conditional critic creates a new problem:
-    #
-    #     push child
-    #     auto_runtime += 1
-    #     build child history
-    #     run core pipeline again
-    #
-    # ========================================================
+    last_result = None
+    human_turn_result = None
 
-    while True:
-        # ====================================================
-        # CURRENT PROBLEM
-        # ====================================================
+    while queue:
+        current_problem, current_history = queue.popleft()
+        current_problem_id = current_problem["problem_id"]
+        current_auto_runtime = current_problem["auto_runtime"]
 
-        if problem_stack:
-            current_problem = problem_stack[current_problem_index]
+        # Do not solve an already solved node again.
+        if current_problem.get("status") == "SOLVED":
+            continue
 
-            current_problem_id = current_problem["problem_id"]
-
-        else:
-            current_problem = None
-            current_problem_id = None
-
-        # ====================================================
-        # RUN CORE PIPELINE
-        # ====================================================
+        # Verified Facts is extracted only when this workflow execution
+        # was started by a real user turn. Child problems are automatic
+        # Advisor calls and must reuse the existing verified memory.
+        extract_verified_facts = human_turn_result is None
 
         result = run_core_workflow(
             history=current_history,
-            verified_facts_memory=(verified_facts_memory),
+            verified_facts_memory=current_verified_facts,
             runtime=runtime,
-            auto_runtime=(current_auto_runtime),
-            current_problem=(current_problem),
-            current_problem_id=(current_problem_id),
-            critic_id_counter=(critic_id_counter),
-            active_critics=(active_critics),
+            auto_runtime=current_auto_runtime,
+            current_problem=current_problem,
+            current_problem_id=current_problem_id,
+            critic_id_counter=critic_id_counter,
+            active_critics=active_critics,
+            extract_verified_facts=extract_verified_facts,
         )
-
-        # ====================================================
-        # MERGE CORE RESULTS
-        # ====================================================
+        last_result = result
+        if human_turn_result is None:
+            human_turn_result = result
 
         all_logs.extend(result["logs"])
-
         all_critic_results.extend(result["critic_results"])
-
         all_critic_records.extend(result["critic_records"])
-
         critic_id_counter = result["critic_id_counter"]
-
         active_critics = result["active_critics"]
-
-        # ----------------------------------------------------
-        # VERIFIED FACTS
-        # ----------------------------------------------------
-        #
-        # The current core result becomes the latest verified
-        # facts memory item.
-        #
-        # The caller will persist the returned memory.
-        #
-        # ----------------------------------------------------
-
-        current_verified_facts = []
-
-        if verified_facts_memory:
-            current_verified_facts.extend(verified_facts_memory)
 
         if result["verified_facts"] is not None:
             current_verified_facts.append(result["verified_facts"].model_dump())
 
-        # ====================================================
-        # USER STILL NEEDS TO ANSWER
-        # ====================================================
-
         if result["needs_input"]:
+            current_problem["status"] = "WAITING_FOR_USER"
             return {
                 **result,
                 "logs": all_logs,
                 "critic_results": all_critic_results,
                 "critic_records": all_critic_records,
                 "active_critics": active_critics,
-                "problem_stack": problem_stack,
-                "current_problem_index": current_problem_index,
-                "critic_id_counter": critic_id_counter,
-                "verified_facts_memory": current_verified_facts,
-                "auto_runtime": current_auto_runtime,
-            }
-
-        # ====================================================
-        # CURRENT ADVICE
-        # ====================================================
-
-        systematic_advice = result["systematic_advice"]
-
-        if systematic_advice is None:
-            return {
-                **result,
-                "logs": all_logs,
-                "critic_results": all_critic_results,
-                "critic_records": all_critic_records,
-                "active_critics": active_critics,
-                "problem_stack": problem_stack,
-                "current_problem_index": current_problem_index,
-                "critic_id_counter": critic_id_counter,
-                "verified_facts_memory": current_verified_facts,
-                "auto_runtime": current_auto_runtime,
-            }
-
-        # ====================================================
-        # CONDITIONAL CRITICS
-        # ====================================================
-
-        conditional_critics = result["conditional_critics"]
-
-        # ====================================================
-        # NO CONDITIONAL CRITICS
-        # ====================================================
-
-        if not conditional_critics:
-            # -----------------------------------------------
-            # Solve current problem
-            # -----------------------------------------------
-
-            if current_problem is not None:
-                current_problem["solution"] = systematic_advice.model_dump()
-
-                current_problem["status"] = "SOLVED"
-
-            # -----------------------------------------------
-            # Child problem completed?
-            # -----------------------------------------------
-
-            if len(problem_stack) > 1:
-                finished_problem = problem_stack.pop()
-
-                current_problem_index = len(problem_stack) - 1
-
-                parent_problem = problem_stack[current_problem_index]
-
-                parent_problem["status"] = "ACTIVE"
-
-                # -------------------------------------------
-                # Attach child result to parent
-                # -------------------------------------------
-
-                if "child_solutions" not in parent_problem:
-                    parent_problem["child_solutions"] = []
-
-                parent_problem["child_solutions"].append(
-                    {
-                        "problem": finished_problem["problem"],
-                        "solution": finished_problem["solution"],
-                        "problem_id": finished_problem["problem_id"],
-                    }
-                )
-
-                # Parent has resumed, but we do not
-                # automatically ask the advisor anything
-                # until another explicit recursive problem
-                # is generated.
-
-            # -----------------------------------------------
-            # Root solved
-            # -----------------------------------------------
-
-            else:
-                if current_problem is not None:
-                    current_problem["status"] = "SOLVED"
-
-            return {
-                **result,
-                "logs": all_logs,
-                "critic_results": all_critic_results,
-                "critic_records": all_critic_records,
-                "active_critics": active_critics,
-                "problem_stack": problem_stack,
-                "current_problem_index": current_problem_index,
-                "critic_id_counter": critic_id_counter,
-                "verified_facts_memory": current_verified_facts,
-                "auto_runtime": current_auto_runtime,
-            }
-
-        # ====================================================
-        # PROCESS CONDITIONAL CRITICS
-        # ====================================================
-        #
-        # For now we use the first conditional critic to create
-        # one child problem.
-        #
-        # Later this can become a proper queue.
-        #
-        # ====================================================
-
-        created_child = None
-
-        for conditional in conditional_critics:
-            explainer = explain_problem(
-                current_problem=(current_problem),
-                conditional_critic=(conditional["critique"]),
-                verified_facts=(current_verified_facts),
-            )
-
-            # -----------------------------------------------
-            # SAVE EXPLAINER LOG
-            # -----------------------------------------------
-
-            explainer_log = {
-                "agent": "Problem Explainer",
-                "runtime": runtime,
-                "auto_runtime": current_auto_runtime,
-                "problem_id": current_problem_id,
-                "prompt": explainer["debug"].llm_prompt,
-                "output": explainer["debug"].llm_output,
-                "status": explainer["status"],
-            }
-
-            all_logs.append(explainer_log)
-
-            explainer_result = explainer["result"]
-
-            if explainer_result is None:
-                continue
-
-            if explainer_result.classification != "NEW_PROBLEM":
-                continue
-
-            if not (explainer_result.problem):
-                continue
-
-            # -----------------------------------------------
-            # DEPTH
-            # -----------------------------------------------
-
-            parent_depth = current_problem.get(
-                "depth",
-                0,
-            )
-
-            new_depth = parent_depth + 1
-
-            if new_depth > max_problem_depth:
-                # Max depth reached.
-                # Do not create another child.
-
-                all_child_problems.append(
-                    {
-                        "status": "MAX_DEPTH_REACHED",
-                        "parent_problem_id": current_problem_id,
-                        "runtime": runtime,
-                        "auto_runtime": current_auto_runtime,
-                        "problem": explainer_result.problem,
-                    }
-                )
-
-                continue
-
-            # -----------------------------------------------
-            # NEW PROBLEM ID
-            # -----------------------------------------------
-
-            new_problem_id = (
-                max(
-                    (problem["problem_id"] for problem in problem_stack),
-                    default=-1,
-                )
-                + 1
-            )
-
-            # -----------------------------------------------
-            # CREATE CHILD PROBLEM
-            # -----------------------------------------------
-
-            created_child = {
-                "problem_id": new_problem_id,
-                "parent_problem_id": current_problem_id,
-                "depth": new_depth,
-                "problem": explainer_result.problem,
-                # This raw problem record is created by the Problem
-                # Explainer call above, so it keeps that exact call's
-                # execution metadata. The automatic Advisor call advances
-                # auto_runtime separately below.
-                "runtime": runtime,
-                "auto_runtime": current_auto_runtime,
-                "agent": "Advisor",
-                "status": "ACTIVE",
-                "solution": None,
-                "source_critic_id": conditional["critic_id"],
-            }
-
-            # Link the debug record to the child problem created by this
-            # exact Problem Explainer call.
-            explainer_log["problem_id"] = new_problem_id
-
-            # Parent waits.
-
-            if current_problem is not None:
-                current_problem["status"] = "WAITING_FOR_CHILD"
-
-            # Push.
-
-            problem_stack.append(created_child)
-
-            current_problem_index = len(problem_stack) - 1
-
-            all_child_problems.append(created_child)
-
-            # Only one child problem at a time.
-            break
-
-        # ====================================================
-        # NO CHILD CREATED
-        # ====================================================
-
-        if created_child is None:
-            # Current problem is solved at this level.
-
-            if current_problem is not None:
-                current_problem["solution"] = systematic_advice.model_dump()
-
-                current_problem["status"] = "SOLVED"
-
-            return {
-                **result,
-                "logs": all_logs,
-                "critic_results": all_critic_results,
-                "critic_records": all_critic_records,
-                "active_critics": active_critics,
-                "problem_stack": problem_stack,
-                "current_problem_index": current_problem_index,
+                "problem_tree": problem_tree,
+                "problem_stack": problem_tree,
+                "current_problem_index": 0,
                 "critic_id_counter": critic_id_counter,
                 "verified_facts_memory": current_verified_facts,
                 "auto_runtime": current_auto_runtime,
                 "child_problems": all_child_problems,
             }
 
-        # ====================================================
-        # AUTOMATIC RE-ENTRY
-        # ====================================================
+        systematic_advice = result["systematic_advice"]
+        if systematic_advice is None:
+            current_problem["status"] = "ERROR"
+            return {
+                **result,
+                "logs": all_logs,
+                "critic_results": all_critic_results,
+                "critic_records": all_critic_records,
+                "active_critics": active_critics,
+                "problem_tree": problem_tree,
+                "problem_stack": problem_tree,
+                "current_problem_index": 0,
+                "critic_id_counter": critic_id_counter,
+                "verified_facts_memory": current_verified_facts,
+                "auto_runtime": current_auto_runtime,
+                "child_problems": all_child_problems,
+            }
 
-        current_auto_runtime += 1
+        # --------------------------------------------------------
+        # IMPORTANT BFS BARRIER:
+        # ALL N critics have already completed inside run_core_workflow.
+        # Now run Problem Explainer for ALL N critic results before
+        # creating or queueing ANY child problem.
+        # --------------------------------------------------------
+        explainer_results = []
 
-        # ----------------------------------------------------
-        # Build the automatic problem-solving input.
-        # ----------------------------------------------------
+        for critic_result in result["critic_results"]:
+            if critic_result.get("critique") is None:
+                explainer_results.append(
+                    {
+                        "critic_id": critic_result["critic_id"],
+                        "result": None,
+                        "debug": None,
+                        "status": "SKIPPED_CRITIC_ERROR",
+                        "new_problem": None,
+                    }
+                )
+                continue
 
-        latest_conditional = conditional_critics[0]
-
-        automatic_problem_payload = (
-            "AUTOMATIC PROBLEM-SOLVING REQUEST\n\n"
-            "NEW PROBLEM:\n"
-            + created_child["problem"]
-            + "\n\nSOURCE CRITIC:\n"
-            + json.dumps(
-                latest_conditional["critique"],
-                indent=2,
-                ensure_ascii=False,
+            explainer = explain_problem(
+                current_problem=current_problem,
+                conditional_critic=critic_result["critique"],
+                verified_facts=current_verified_facts,
             )
-            + "\n\nFULL VERIFIED FACTS:\n"
-            + json.dumps(
-                current_verified_facts,
-                indent=2,
-                ensure_ascii=False,
+
+            explainer_result = explainer["result"]
+            child_payload = None
+
+            all_logs.append(
+                {
+                    "agent": "Problem Explainer",
+                    "runtime": current_problem["runtime"],
+                    "auto_runtime": current_problem["auto_runtime"],
+                    "problem_id": current_problem_id,
+                    "critic_id": critic_result["critic_id"],
+                    "prompt": explainer["debug"].llm_prompt,
+                    "output": explainer["debug"].llm_output,
+                    "status": explainer["status"],
+                }
             )
+
+            if (
+                explainer_result is not None
+                and explainer_result.classification == "NEW_PROBLEM"
+                and explainer_result.problem
+            ):
+                child_payload = explainer_result
+
+            explainer_results.append(
+                {
+                    "critic_id": critic_result["critic_id"],
+                    "result": explainer_result,
+                    "debug": explainer["debug"],
+                    "status": explainer["status"],
+                    "new_problem": None,
+                    "child_payload": child_payload,
+                }
+            )
+
+        # --------------------------------------------------------
+        # All explainers are complete. Only now can children be built.
+        # --------------------------------------------------------
+        _attach_action_plans(
+            current_problem=current_problem,
+            advisor_strategy=systematic_advice.model_dump(),
+            critic_results=result["critic_results"],
+            explainer_results=explainer_results,
+            runtime=current_problem["runtime"],
+            auto_runtime=current_problem["auto_runtime"],
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # This is an automatic re-entry.
-        # We do NOT create a new human runtime.
-        #
-        # ----------------------------------------------------
+        next_children = []
+        for action_node, explainer_item in zip(
+            current_problem["action_plans"], explainer_results
+        ):
+            explainer_result = explainer_item.get("child_payload")
+            if explainer_result is None:
+                continue
 
-        current_history = list(history)
+            new_depth = current_problem.get("depth", 0) + 1
+            if new_depth > max_problem_depth:
+                action_node["new_problem"] = None
+                action_node["new_problem_classification"] = "MAX_DEPTH_REACHED"
+                action_node["new_problem_reason"] = (
+                    "A new problem was identified, but the configured maximum problem depth was reached."
+                )
+                continue
 
-        current_history.append(
-            (
-                "user",
-                automatic_problem_payload,
+            new_problem_id = _next_problem_id(problem_tree)
+            next_auto_runtime += 1
+            child_auto_runtime = next_auto_runtime
+
+            child_node = _build_problem_node(
+                problem_id=new_problem_id,
+                parent_problem_id=current_problem_id,
+                depth=new_depth,
+                problem=explainer_result.problem,
+                runtime=runtime,
+                auto_runtime=child_auto_runtime,
+                source_critic_id=explainer_item["critic_id"],
             )
+
+            action_node["new_problem"] = child_node
+            action_node["new_problem_classification"] = "NEW_PROBLEM"
+            action_node["new_problem_reason"] = explainer_result.reason
+
+            next_children.append(
+                (
+                    child_node,
+                    _automatic_problem_history(
+                        base_history=current_history,
+                        child_problem=child_node,
+                        source_critic=next(
+                            (
+                                c["critique"]
+                                for c in result["critic_results"]
+                                if c["critic_id"] == explainer_item["critic_id"]
+                            ),
+                            {},
+                        ),
+                        verified_facts=current_verified_facts,
+                    ),
+                )
+            )
+            all_child_problems.append(child_node)
+
+        current_problem["solution"] = systematic_advice.model_dump()
+        current_problem["status"] = (
+            "WAITING_FOR_CHILDREN" if next_children else "SOLVED"
         )
 
-        # Continue the recursion loop.
+        # Append all siblings only after ALL current-level explainers completed.
+        for child in next_children:
+            queue.append(child)
+
+    # If BFS has exhausted, every queued problem has completed.
+    # Mark ancestors with no unresolved children as solved.
+    def finalize(node):
+        unresolved = False
+        for action in node.get("action_plans", []):
+            child = action.get("new_problem")
+            if child:
+                finalize(child)
+                if child.get("status") not in {"SOLVED", "ERROR", "WAITING_FOR_USER"}:
+                    unresolved = True
+        if node.get("status") == "WAITING_FOR_CHILDREN" and not unresolved:
+            node["status"] = "SOLVED"
+
+    for root_node in problem_tree:
+        finalize(root_node)
+
+    # The last result provides the normal UI response. Root response is used
+    # for the human turn because child problem solving is automatic.
+    if human_turn_result is None:
+        human_turn_result = {
+            "response": "",
+            "classification": None,
+            "needs_input": False,
+            "verified_facts": None,
+            "systematic_advice": None,
+        }
+
+    return {
+        **human_turn_result,
+        "logs": all_logs,
+        "critic_results": all_critic_results,
+        "critic_records": all_critic_records,
+        "active_critics": active_critics,
+        "problem_tree": problem_tree,
+        "problem_stack": problem_tree,
+        "current_problem_index": 0,
+        "critic_id_counter": critic_id_counter,
+        "verified_facts_memory": current_verified_facts,
+        "auto_runtime": current_auto_runtime,
+        "child_problems": all_child_problems,
+    }

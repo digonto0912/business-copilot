@@ -149,6 +149,7 @@ def run_core_workflow(
     current_problem_id=None,
     critic_id_counter=0,
     active_critics=None,
+    extract_verified_facts=True,
 ):
     """
     Runs ONE complete core agent pipeline.
@@ -166,7 +167,7 @@ def run_core_workflow(
 
         Advisor
           ↓
-        Verified Facts
+        Verified Facts (only for a user turn when extract_verified_facts=True)
           ↓
         Classifier
           ↓
@@ -256,40 +257,46 @@ def run_core_workflow(
     # ========================================================
     # 3. VERIFIED FACTS
     # ========================================================
+    # Verified Facts is a USER-TURN operation only.
+    # Automatic Advisor calls must reuse the existing verified
+    # facts memory and must NOT execute this LLM.
 
-    verified_facts_debug = LLMDebugHandler()
+    verified_facts = None
 
-    try:
-        verified_facts = verified_facts_chain.with_config(
-            callbacks=[verified_facts_debug]
-        ).invoke(
+    if extract_verified_facts:
+        verified_facts_debug = LLMDebugHandler()
+
+        try:
+            verified_facts = verified_facts_chain.with_config(
+                callbacks=[verified_facts_debug]
+            ).invoke(
+                {
+                    "human_message_1": human_message_1,
+                    "human_message_2": human_message_2,
+                    "advisor_reply": advisor_response,
+                }
+            )
+
+            verified_facts_status = "SUCCESS"
+
+        except Exception as e:
+            verified_facts = None
+
+            verified_facts_status = "ERROR"
+
+            verified_facts_debug.llm_output = {"error": str(e)}
+
+        logs.append(
             {
-                "human_message_1": human_message_1,
-                "human_message_2": human_message_2,
-                "advisor_reply": advisor_response,
+                "agent": "Verified Facts LLM",
+                "runtime": runtime,
+                "auto_runtime": auto_runtime,
+                "problem_id": current_problem_id,
+                "prompt": verified_facts_debug.llm_prompt,
+                "output": verified_facts_debug.llm_output,
+                "status": verified_facts_status,
             }
         )
-
-        verified_facts_status = "SUCCESS"
-
-    except Exception as e:
-        verified_facts = None
-
-        verified_facts_status = "ERROR"
-
-        verified_facts_debug.llm_output = {"error": str(e)}
-
-    logs.append(
-        {
-            "agent": "Verified Facts LLM",
-            "runtime": runtime,
-            "auto_runtime": auto_runtime,
-            "problem_id": current_problem_id,
-            "prompt": verified_facts_debug.llm_prompt,
-            "output": verified_facts_debug.llm_output,
-            "status": verified_facts_status,
-        }
-    )
 
     # ========================================================
     # 4. CLASSIFIER

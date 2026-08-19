@@ -15,6 +15,7 @@ from agents import (
 )
 
 from schemas.verified_facts_schema import VerifiedFacts
+from rate_limit import gemini_31_flash_lite_quota, gemma_4_31b_quota, get_quota_snapshot
 
 
 # ============================================================
@@ -208,7 +209,7 @@ def run_core_workflow(
     advisor_debug = LLMDebugHandler()
 
     try:
-        advisor_response = advisor_chain.with_config(callbacks=[advisor_debug]).invoke(
+        advisor_response = advisor_chain.with_config(callbacks=[advisor_debug, gemma_4_31b_quota]).invoke(
             {"messages": history}
         )
 
@@ -230,6 +231,7 @@ def run_core_workflow(
             "prompt": advisor_debug.llm_prompt,
             "output": advisor_debug.llm_output,
             "status": advisor_status,
+            "quota": get_quota_snapshot("gemma-4-31b-it"),
         }
     )
 
@@ -268,7 +270,7 @@ def run_core_workflow(
 
         try:
             verified_facts = verified_facts_chain.with_config(
-                callbacks=[verified_facts_debug]
+                callbacks=[verified_facts_debug, gemini_31_flash_lite_quota]
             ).invoke(
                 {
                     "human_message_1": human_message_1,
@@ -295,6 +297,7 @@ def run_core_workflow(
                 "prompt": verified_facts_debug.llm_prompt,
                 "output": verified_facts_debug.llm_output,
                 "status": verified_facts_status,
+                "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
             }
         )
 
@@ -306,7 +309,7 @@ def run_core_workflow(
 
     try:
         classification = classifier_chain.with_config(
-            callbacks=[classifier_debug]
+            callbacks=[classifier_debug, gemini_31_flash_lite_quota]
         ).invoke({"response": advisor_response})
 
         classification = classification.strip().upper()
@@ -329,6 +332,7 @@ def run_core_workflow(
             "prompt": classifier_debug.llm_prompt,
             "output": classifier_debug.llm_output,
             "status": classifier_status,
+            "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
         }
     )
 
@@ -365,7 +369,7 @@ def run_core_workflow(
 
     try:
         systematic_advice = systematic_advice_converter_chain.with_config(
-            callbacks=[systematic_advice_debug]
+            callbacks=[systematic_advice_debug, gemini_31_flash_lite_quota]
         ).invoke({"advisor_reply": advisor_response})
 
         systematic_advice_status = "SUCCESS"
@@ -386,6 +390,7 @@ def run_core_workflow(
             "prompt": systematic_advice_debug.llm_prompt,
             "output": systematic_advice_debug.llm_output,
             "status": systematic_advice_status,
+            "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
         }
     )
 

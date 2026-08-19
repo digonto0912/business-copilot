@@ -11,6 +11,7 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool, tool
 
 from llm import llm
+from rate_limit import gemini_31_flash_lite_quota
 
 from prompts import get_critic_prompt
 
@@ -287,7 +288,9 @@ class CriticAgent:
         ):
 
             ai_message: AIMessage = (
-                self._llm_with_tools.invoke(
+                self._llm_with_tools.with_config(
+                    callbacks=[gemini_31_flash_lite_quota]
+                ).invoke(
                     messages
                 )
             )

@@ -7,6 +7,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 from agent_workflow import run_core_workflow
 from agents import problem_identifier_agent, problem_explainer_agent
+from rate_limit import gemini_31_flash_lite_quota, get_quota_snapshot
 
 
 class RecursionDebugHandler(BaseCallbackHandler):
@@ -52,7 +53,7 @@ class RecursionDebugHandler(BaseCallbackHandler):
 def identify_problem(user_input):
     debug = RecursionDebugHandler()
     try:
-        result = problem_identifier_agent.with_config(callbacks=[debug]).invoke(
+        result = problem_identifier_agent.with_config(callbacks=[debug, gemini_31_flash_lite_quota]).invoke(
             {"user_input": user_input}
         )
         return {"result": result, "debug": debug, "status": "SUCCESS"}
@@ -64,7 +65,7 @@ def identify_problem(user_input):
 def explain_problem(current_problem, conditional_critic, verified_facts):
     debug = RecursionDebugHandler()
     try:
-        result = problem_explainer_agent.with_config(callbacks=[debug]).invoke(
+        result = problem_explainer_agent.with_config(callbacks=[debug, gemini_31_flash_lite_quota]).invoke(
             {
                 "current_problem": json.dumps(
                     current_problem, indent=2, ensure_ascii=False
@@ -299,6 +300,7 @@ def run_workflow(
                 "prompt": identifier["debug"].llm_prompt,
                 "output": identifier["debug"].llm_output,
                 "status": identifier["status"],
+                "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
             }
         )
 
@@ -463,6 +465,7 @@ def run_workflow(
                     "prompt": explainer["debug"].llm_prompt,
                     "output": explainer["debug"].llm_output,
                     "status": explainer["status"],
+                    "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
                 }
             )
 

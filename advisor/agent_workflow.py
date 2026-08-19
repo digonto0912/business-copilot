@@ -289,9 +289,16 @@ def run_core_workflow(
     advisor_debug = LLMDebugHandler()
 
     try:
-        advisor_response = advisor_chain.with_config(callbacks=[advisor_debug, gemma_4_31b_quota]).invoke(
+        advisor_response = advisor_chain.with_config(
+            callbacks=[advisor_debug, gemma_4_31b_quota]
+        ).invoke(
             {"messages": history}
         )
+
+        if advisor_response is None or not str(advisor_response).strip():
+            raise RuntimeError(
+                "Advisor returned an empty response."
+            )
 
         advisor_status = "SUCCESS"
 
@@ -314,6 +321,22 @@ def run_core_workflow(
             "quota": get_quota_snapshot("gemma-4-31b-it"),
         }
     )
+
+    # Never feed an Advisor error/empty response into downstream agents.
+    if advisor_status != "SUCCESS":
+        return {
+            "response": "",
+            "classification": None,
+            "needs_input": False,
+            "verified_facts": None,
+            "systematic_advice": None,
+            "critic_results": [],
+            "critic_records": [],
+            "conditional_critics": [],
+            "active_critics": active_critics,
+            "critic_id_counter": critic_id_counter,
+            "logs": logs,
+        }
 
     # ========================================================
     # 2. LAST TWO HUMAN MESSAGES
@@ -392,7 +415,12 @@ def run_core_workflow(
             callbacks=[classifier_debug, gemini_31_flash_lite_quota]
         ).invoke({"response": advisor_response})
 
-        classification = classification.strip().upper()
+        classification = str(classification).strip().upper()
+
+        if not classification:
+            raise RuntimeError(
+                "Classifier returned an empty response."
+            )
 
         classifier_status = "SUCCESS"
 
@@ -415,6 +443,21 @@ def run_core_workflow(
             "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
         }
     )
+
+    if classifier_status != "SUCCESS":
+        return {
+            "response": advisor_response,
+            "classification": None,
+            "needs_input": False,
+            "verified_facts": verified_facts,
+            "systematic_advice": None,
+            "critic_results": [],
+            "critic_records": [],
+            "conditional_critics": [],
+            "active_critics": active_critics,
+            "critic_id_counter": critic_id_counter,
+            "logs": logs,
+        }
 
     # ========================================================
     # 5. DECISION

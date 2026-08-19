@@ -242,7 +242,7 @@ with left:
         value=st.session_state.max_problem_depth,
         step=1,
         key="max_problem_depth",
-        help=("Maximum recursive depth allowed for child problems."),
+        help=("Maximum total problem layers, including the root problem."),
     )
 
     # --------------------------------------------------------
@@ -543,7 +543,26 @@ with right:
     # DOWNLOAD FULL SESSION
     # ========================================================
 
-    st.download_button("⬇️ Download Full Session", json.dumps({k: v for k, v in st.session_state.items()}, indent=2, ensure_ascii=False, default=str), "full_session.json", "application/json", use_container_width=True)
+    # Do not serialize the entire recursive session on every Streamlit
+    # rerun. This used to make the app expensive to render after a large
+    # workflow had completed. Prepare the JSON only when requested.
+    if st.button(
+        "⬇️ Prepare Full Session Download",
+        use_container_width=True,
+    ):
+        session_json = json.dumps(
+            {k: v for k, v in st.session_state.items()},
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+        st.download_button(
+            "Download prepared session JSON",
+            session_json,
+            "full_session.json",
+            "application/json",
+            use_container_width=True,
+        )
 
 
     # ========================================================

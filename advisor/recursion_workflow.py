@@ -403,8 +403,12 @@ def _attach_conditional_result(
             "next_auto_runtime": next_auto_runtime,
         }
 
+    # max_problem_depth is user-facing as TOTAL PROBLEM LAYERS,
+    # including the root (depth 0). Therefore a setting of 3 allows
+    # depths 0, 1, and 2 only.
+    max_allowed_depth = max(0, max_problem_depth - 1)
     new_depth = current_problem.get("depth", 0) + 1
-    if new_depth > max_problem_depth:
+    if new_depth > max_allowed_depth:
         action_version["new_problem_classification"] = "MAX_DEPTH_REACHED"
         action_version["new_problem_reason"] = (
             "A new problem was identified, but the configured maximum problem depth was reached."
@@ -614,40 +618,53 @@ def run_workflow(
         if result["verified_facts"] is not None:
             current_verified_facts.append(result["verified_facts"].model_dump())
 
+        # Automatic child problems must never abort the entire BFS run.
+        # A child may hit NEEDS_INPUT or an agent error/empty response;
+        # record that child as a terminal execution state and continue
+        # processing the rest of the queue. The original human-turn result
+        # remains the response returned to the UI.
         if result["needs_input"]:
-            current_problem["status"] = "WAITING_FOR_USER"
-            return {
-                **result,
-                "logs": all_logs,
-                "critic_results": all_critic_results,
-                "critic_records": all_critic_records,
-                "active_critics": active_critics,
-                "problem_tree": problem_tree,
-                "problem_stack": problem_tree,
-                "current_problem_index": 0,
-                "critic_id_counter": critic_id_counter,
-                "verified_facts_memory": current_verified_facts,
-                "auto_runtime": current_auto_runtime,
-                "child_problems": all_child_problems,
-            }
+            current_problem["status"] = "AUTO_INPUT_REQUIRED"
+            all_logs.append(
+                {
+                    "agent": "Workflow Controller",
+                    "runtime": current_problem["runtime"],
+                    "auto_runtime": current_problem["auto_runtime"],
+                    "problem_id": current_problem_id,
+                    "prompt": None,
+                    "output": {
+                        "reason": (
+                            "Automatic child problem requested additional user input; "
+                            "workflow did not stop."
+                        ),
+                        "advisor_response": result.get("response"),
+                    },
+                    "status": "AUTO_INPUT_REQUIRED",
+                }
+            )
+            continue
 
         systematic_advice = result["systematic_advice"]
         if systematic_advice is None:
             current_problem["status"] = "ERROR"
-            return {
-                **result,
-                "logs": all_logs,
-                "critic_results": all_critic_results,
-                "critic_records": all_critic_records,
-                "active_critics": active_critics,
-                "problem_tree": problem_tree,
-                "problem_stack": problem_tree,
-                "current_problem_index": 0,
-                "critic_id_counter": critic_id_counter,
-                "verified_facts_memory": current_verified_facts,
-                "auto_runtime": current_auto_runtime,
-                "child_problems": all_child_problems,
-            }
+            all_logs.append(
+                {
+                    "agent": "Workflow Controller",
+                    "runtime": current_problem["runtime"],
+                    "auto_runtime": current_problem["auto_runtime"],
+                    "problem_id": current_problem_id,
+                    "prompt": None,
+                    "output": {
+                        "reason": (
+                            "This problem's core workflow failed or returned an empty/invalid "
+                            "structured strategy. The BFS queue continues with remaining problems."
+                        ),
+                        "advisor_response": result.get("response"),
+                    },
+                    "status": "CHILD_WORKFLOW_ERROR",
+                }
+            )
+            continue
 
         verified_context = current_verified_facts
         advisor_strategy = systematic_advice.model_dump()

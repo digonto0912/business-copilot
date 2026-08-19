@@ -5,9 +5,26 @@ from collections import deque
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from agent_workflow import run_core_workflow
-from agents import problem_identifier_agent, problem_explainer_agent
+from agent_workflow import (
+    repair_failed_action,
+    run_core_workflow,
+)
+from agents import problem_explainer_agent, problem_identifier_agent, CriticAgent
 from rate_limit import gemini_31_flash_lite_quota, get_quota_snapshot
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+DEFAULT_MAX_FAIL_REPAIR_ATTEMPTS = 3
+
+critic_agent = CriticAgent()
+
+
+# ============================================================
+# DEBUG
+# ============================================================
 
 
 class RecursionDebugHandler(BaseCallbackHandler):
@@ -50,12 +67,17 @@ class RecursionDebugHandler(BaseCallbackHandler):
             self.llm_output = {"error": str(e)}
 
 
+# ============================================================
+# SINGLE-AGENT HELPERS
+# ============================================================
+
+
 def identify_problem(user_input):
     debug = RecursionDebugHandler()
     try:
-        result = problem_identifier_agent.with_config(callbacks=[debug, gemini_31_flash_lite_quota]).invoke(
-            {"user_input": user_input}
-        )
+        result = problem_identifier_agent.with_config(
+            callbacks=[debug, gemini_31_flash_lite_quota]
+        ).invoke({"user_input": user_input})
         return {"result": result, "debug": debug, "status": "SUCCESS"}
     except Exception as e:
         debug.llm_output = {"error": str(e)}
@@ -65,7 +87,9 @@ def identify_problem(user_input):
 def explain_problem(current_problem, conditional_critic, verified_facts):
     debug = RecursionDebugHandler()
     try:
-        result = problem_explainer_agent.with_config(callbacks=[debug, gemini_31_flash_lite_quota]).invoke(
+        result = problem_explainer_agent.with_config(
+            callbacks=[debug, gemini_31_flash_lite_quota]
+        ).invoke(
             {
                 "current_problem": json.dumps(
                     current_problem, indent=2, ensure_ascii=False
@@ -84,6 +108,27 @@ def explain_problem(current_problem, conditional_critic, verified_facts):
         return {"result": None, "debug": debug, "status": "ERROR"}
 
 
+# ============================================================
+# TREE HELPERS
+# ============================================================
+
+
+def _iter_action_chain(action):
+    """Yield an original action plus every FAIL repair revision."""
+    yield action
+    revision = action.get("repair_chain")
+    while revision:
+        yield revision
+        revision = revision.get("next_revision")
+
+
+def _iter_child_nodes(action):
+    for action_version in _iter_action_chain(action):
+        child = action_version.get("new_problem")
+        if child:
+            yield child
+
+
 def _next_problem_id(problem_tree):
     ids = []
 
@@ -93,8 +138,7 @@ def _next_problem_id(problem_tree):
         if isinstance(node.get("problem_id"), int):
             ids.append(node["problem_id"])
         for action in node.get("action_plans", []):
-            child = action.get("new_problem")
-            if child:
+            for child in _iter_child_nodes(action):
                 walk(child)
 
     for root in problem_tree:
@@ -114,8 +158,7 @@ def _find_problem(problem_tree, problem_id):
             found = node
             return
         for action in node.get("action_plans", []):
-            child = action.get("new_problem")
-            if child:
+            for child in _iter_child_nodes(action):
                 walk(child)
 
     for root in problem_tree:
@@ -164,53 +207,6 @@ def _automatic_problem_history(base_history, child_problem, source_critic, verif
     return child_history
 
 
-def _attach_action_plans(
-    current_problem,
-    advisor_strategy,
-    critic_results,
-    explainer_results,
-    runtime,
-    auto_runtime,
-):
-    """Attach every action, its critic verdict, and explainer result to the problem node."""
-
-    explain_by_critic = {item["critic_id"]: item for item in explainer_results}
-
-    current_problem["action_plans"] = []
-
-    for critic_result in critic_results:
-        critic_id = critic_result["critic_id"]
-        action_item = critic_result.get("action")
-        critique = critic_result.get("critique") or {}
-
-        action_node = {
-            "action_plan": action_item,
-            "critic_id": critic_id,
-            "runtime": runtime,
-            "auto_runtime": auto_runtime,
-            "verdict": critique.get("verdict") if isinstance(critique, dict) else None,
-            "verdict_reason": (
-                critique.get("verdict_reason")
-                if isinstance(critique, dict)
-                else None
-            ),
-            "new_problem": None,
-        }
-
-        explainer = explain_by_critic.get(critic_id)
-        if explainer is not None:
-            result = explainer.get("result")
-            if result is not None:
-                action_node["new_problem"] = explainer.get("new_problem")
-                action_node["new_problem_classification"] = result.classification
-                action_node["new_problem_reason"] = result.reason
-            else:
-                action_node["new_problem_classification"] = None
-                action_node["new_problem_reason"] = None
-
-        current_problem["action_plans"].append(action_node)
-
-
 def _max_auto_runtime(problem_tree):
     maximum = 0
 
@@ -222,14 +218,251 @@ def _max_auto_runtime(problem_tree):
         if isinstance(value, int):
             maximum = max(maximum, value)
         for action in node.get("action_plans", []):
-            child = action.get("new_problem")
-            if child:
+            for child in _iter_child_nodes(action):
                 walk(child)
 
     for root in problem_tree:
         walk(root)
 
     return maximum
+
+
+# ============================================================
+# ACTION NODE HELPERS
+# ============================================================
+
+
+def _build_action_node(critic_result, runtime, auto_runtime):
+    critique = critic_result.get("critique") or {}
+    verdict = critique.get("verdict") if isinstance(critique, dict) else None
+
+    action_node = {
+        "action_plan": critic_result.get("action"),
+        "critic_id": critic_result["critic_id"],
+        "runtime": runtime,
+        "auto_runtime": auto_runtime,
+        "verdict": verdict,
+        "verdict_reason": (
+            critique.get("verdict_reason")
+            if isinstance(critique, dict)
+            else None
+        ),
+        "status": {
+            "PASS": "PASSED",
+            "CONDITIONAL": "CONDITIONAL",
+            "FAIL": "FAILED",
+        }.get(verdict, "CRITIC_ERROR"),
+        "new_problem": None,
+        "new_problem_classification": None,
+        "new_problem_reason": None,
+        "final_action_plan": critic_result.get("action") if verdict == "PASS" else None,
+        "repair_attempts": 0,
+        "repair_attempt_log": [],
+        "repair_chain": None,
+    }
+
+    return action_node
+
+
+def _allocate_critic_id(
+    critic_id_counter,
+    current_problem_id,
+    runtime,
+    auto_runtime,
+    active_critics,
+):
+    critic_id_counter += 1
+    critic_record = {
+        "critic_id": critic_id_counter,
+        "problem_id": current_problem_id,
+        "runtime": runtime,
+        "auto_runtime": auto_runtime,
+    }
+    active_critics.append(critic_record)
+    return critic_id_counter, critic_record
+
+
+def _critic_repaired_action(
+    action_item,
+    parent_strategy_context,
+    verified_context,
+    problem_id,
+    runtime,
+    auto_runtime,
+    critic_id_counter,
+    active_critics,
+):
+    critic_id_counter, critic_record = _allocate_critic_id(
+        critic_id_counter=critic_id_counter,
+        current_problem_id=problem_id,
+        runtime=runtime,
+        auto_runtime=auto_runtime,
+        active_critics=active_critics,
+    )
+
+    target_strategy = dict(parent_strategy_context)
+    target_strategy["prioritized_action_plan"] = [action_item]
+
+    try:
+        critique = critic_agent.critique_action(
+            action_item=action_item,
+            verified_context=verified_context,
+            advisor_strategy=target_strategy,
+        )
+        critique_data = critique.model_dump()
+        status = "SUCCESS"
+        error = None
+    except Exception as e:
+        critique_data = None
+        status = "ERROR"
+        error = str(e)
+
+    if critic_record in active_critics:
+        active_critics.remove(critic_record)
+
+    record = critic_record.copy()
+    record["status"] = status
+    if error:
+        record["error"] = error
+
+    log = {
+        "agent": f"Reality-Check Critic #{critic_id_counter}",
+        "runtime": runtime,
+        "auto_runtime": auto_runtime,
+        "problem_id": problem_id,
+        "critic_id": critic_id_counter,
+        "prompt": {
+            "verified_context": verified_context,
+            "advisor_strategy": target_strategy,
+            "target_action": action_item,
+        },
+        "output": critique_data if critique_data is not None else {"error": error},
+        "status": status,
+    }
+
+    return (
+        {
+            "critic_id": critic_id_counter,
+            "problem_id": problem_id,
+            "runtime": runtime,
+            "auto_runtime": auto_runtime,
+            "action": action_item,
+            "critique": critique_data,
+            "status": status,
+            **({"error": error} if error else {}),
+        },
+        record,
+        log,
+        critic_id_counter,
+    )
+
+
+def _attach_conditional_result(
+    action_version,
+    current_problem,
+    conditional_critic,
+    verified_facts,
+    current_history,
+    runtime,
+    next_auto_runtime,
+    max_problem_depth,
+    problem_tree,
+    all_child_problems,
+):
+    """Run Problem Explainer for a CONDITIONAL action only."""
+
+    explainer = explain_problem(
+        current_problem=current_problem,
+        conditional_critic=conditional_critic,
+        verified_facts=verified_facts,
+    )
+
+    result = explainer["result"]
+    action_version["new_problem"] = None
+    action_version["new_problem_classification"] = None
+    action_version["new_problem_reason"] = None
+
+    if result is None:
+        action_version["status"] = "CONDITIONAL_EXPLAINER_ERROR"
+        return {
+            "explainer": explainer,
+            "child": None,
+            "history": None,
+            "next_auto_runtime": next_auto_runtime,
+        }
+
+    action_version["new_problem_classification"] = result.classification
+    action_version["new_problem_reason"] = result.reason
+
+    if result.classification != "NEW_PROBLEM" or not result.problem:
+        action_version["status"] = "CONDITIONAL_NO_NEW_PROBLEM"
+        return {
+            "explainer": explainer,
+            "child": None,
+            "history": None,
+            "next_auto_runtime": next_auto_runtime,
+        }
+
+    new_depth = current_problem.get("depth", 0) + 1
+    if new_depth > max_problem_depth:
+        action_version["new_problem_classification"] = "MAX_DEPTH_REACHED"
+        action_version["new_problem_reason"] = (
+            "A new problem was identified, but the configured maximum problem depth was reached."
+        )
+        action_version["status"] = "CONDITIONAL_MAX_DEPTH_REACHED"
+        return {
+            "explainer": explainer,
+            "child": None,
+            "history": None,
+            "next_auto_runtime": next_auto_runtime,
+        }
+
+    new_problem_id = _next_problem_id(problem_tree)
+    next_auto_runtime += 1
+
+    child_node = _build_problem_node(
+        problem_id=new_problem_id,
+        parent_problem_id=current_problem["problem_id"],
+        depth=new_depth,
+        problem=result.problem,
+        runtime=runtime,
+        auto_runtime=next_auto_runtime,
+        source_critic_id=action_version["critic_id"],
+    )
+
+    action_version["new_problem"] = child_node
+    action_version["status"] = "CONDITIONAL_NEW_PROBLEM"
+    all_child_problems.append(child_node)
+
+    child_history = _automatic_problem_history(
+        base_history=current_history,
+        child_problem=child_node,
+        source_critic=conditional_critic,
+        verified_facts=verified_facts,
+    )
+
+    return {
+        "explainer": explainer,
+        "child": child_node,
+        "history": child_history,
+        "next_auto_runtime": next_auto_runtime,
+    }
+
+
+def _append_repair_revision(parent_action, revision):
+    if parent_action.get("repair_chain") is None:
+        parent_action["repair_chain"] = revision
+        return
+
+    cursor = parent_action["repair_chain"]
+    while cursor.get("next_revision") is not None:
+        cursor = cursor["next_revision"]
+    cursor["next_revision"] = revision
+
+
+# ============================================================
+# MAIN WORKFLOW
+# ============================================================
 
 
 def run_workflow(
@@ -241,20 +474,26 @@ def run_workflow(
     critic_id_counter=0,
     active_critics=None,
     max_problem_depth=3,
-    # Kept only for compatibility with older callers. It is not used for traversal.
+    max_fail_repair_attempts=DEFAULT_MAX_FAIL_REPAIR_ATTEMPTS,
     problem_stack=None,
     current_problem_index=0,
 ):
     """
-    BFS orchestration around the existing agent pipeline.
+    BFS orchestration with three critic verdict branches:
 
-    Existing agents remain intact:
-        Problem Identifier -> Advisor -> Verified Facts -> Classifier
-        -> Systematic Advice Converter -> ALL Critics -> ALL Problem Explainers
-        -> queue discovered child problems -> Advisor serially, breadth-first.
+    PASS:
+        keep the action unchanged.
 
-    The critical invariant is that no child problem is sent to Advisor until
-    every critic and every Problem Explainer for the current problem has finished.
+    CONDITIONAL:
+        run Problem Explainer and, if it finds a distinct problem,
+        create a normal child Problem node.
+
+    FAIL:
+        do NOT run Problem Explainer. Instead repeatedly ask the Advisor
+        to repair the SAME action using the parent problem, failed action,
+        critic feedback, and verified facts. Each repaired version is
+        re-criticised. The repair history is stored as a linked list.
+        A bounded retry count prevents endless Advisor calls.
     """
 
     if verified_facts_memory is None:
@@ -262,12 +501,9 @@ def run_workflow(
     if active_critics is None:
         active_critics = []
 
-    # Migrate the old stack only as input compatibility; all new traversal is tree-based.
     if problem_tree is None:
         problem_tree = []
         if problem_stack:
-            # Preserve the existing root/problem objects as much as possible.
-            # Nested legacy stack nodes are flattened into roots only for migration.
             problem_tree.extend(problem_stack)
             for node in problem_tree:
                 node.setdefault("action_plans", [])
@@ -338,18 +574,10 @@ def run_workflow(
             "child_problems": all_child_problems,
         }
 
-    # ------------------------------------------------------------
-    # BFS queue.
-    # Root is processed first. Children discovered from one complete
-    # level are appended after ALL explainers of that level finish.
-    # ------------------------------------------------------------
     queue = deque()
     root = problem_tree[0]
-
-    # If root already has a completed solution, this call is normally a continuation.
     queue.append((root, list(history)))
 
-    last_result = None
     human_turn_result = None
 
     while queue:
@@ -357,13 +585,9 @@ def run_workflow(
         current_problem_id = current_problem["problem_id"]
         current_auto_runtime = current_problem["auto_runtime"]
 
-        # Do not solve an already solved node again.
         if current_problem.get("status") == "SOLVED":
             continue
 
-        # Verified Facts is extracted only when this workflow execution
-        # was started by a real user turn. Child problems are automatic
-        # Advisor calls and must reuse the existing verified memory.
         extract_verified_facts = human_turn_result is None
 
         result = run_core_workflow(
@@ -377,7 +601,7 @@ def run_workflow(
             active_critics=active_critics,
             extract_verified_facts=extract_verified_facts,
         )
-        last_result = result
+
         if human_turn_result is None:
             human_turn_result = result
 
@@ -425,153 +649,351 @@ def run_workflow(
                 "child_problems": all_child_problems,
             }
 
-        # --------------------------------------------------------
-        # IMPORTANT BFS BARRIER:
-        # ALL N critics have already completed inside run_core_workflow.
-        # Now run Problem Explainer for ALL N critic results before
-        # creating or queueing ANY child problem.
-        # --------------------------------------------------------
-        explainer_results = []
+        verified_context = current_verified_facts
+        advisor_strategy = systematic_advice.model_dump()
+
+        # ========================================================
+        # BUILD INITIAL ACTION NODES
+        # ========================================================
+
+        current_problem["action_plans"] = []
+        initial_action_nodes = []
 
         for critic_result in result["critic_results"]:
-            if critic_result.get("critique") is None:
-                explainer_results.append(
-                    {
-                        "critic_id": critic_result["critic_id"],
-                        "result": None,
-                        "debug": None,
-                        "status": "SKIPPED_CRITIC_ERROR",
-                        "new_problem": None,
-                    }
-                )
-                continue
-
-            explainer = explain_problem(
-                current_problem=current_problem,
-                conditional_critic=critic_result["critique"],
-                verified_facts=current_verified_facts,
+            action_node = _build_action_node(
+                critic_result=critic_result,
+                runtime=current_problem["runtime"],
+                auto_runtime=current_problem["auto_runtime"],
             )
+            current_problem["action_plans"].append(action_node)
+            initial_action_nodes.append((critic_result, action_node))
 
-            explainer_result = explainer["result"]
-            child_payload = None
-
-            all_logs.append(
-                {
-                    "agent": "Problem Explainer",
-                    "runtime": current_problem["runtime"],
-                    "auto_runtime": current_problem["auto_runtime"],
-                    "problem_id": current_problem_id,
-                    "critic_id": critic_result["critic_id"],
-                    "prompt": explainer["debug"].llm_prompt,
-                    "output": explainer["debug"].llm_output,
-                    "status": explainer["status"],
-                    "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
-                }
-            )
-
-            if (
-                explainer_result is not None
-                and explainer_result.classification == "NEW_PROBLEM"
-                and explainer_result.problem
-            ):
-                child_payload = explainer_result
-
-            explainer_results.append(
-                {
-                    "critic_id": critic_result["critic_id"],
-                    "result": explainer_result,
-                    "debug": explainer["debug"],
-                    "status": explainer["status"],
-                    "new_problem": None,
-                    "child_payload": child_payload,
-                }
-            )
-
-        # --------------------------------------------------------
-        # All explainers are complete. Only now can children be built.
-        # --------------------------------------------------------
-        _attach_action_plans(
-            current_problem=current_problem,
-            advisor_strategy=systematic_advice.model_dump(),
-            critic_results=result["critic_results"],
-            explainer_results=explainer_results,
-            runtime=current_problem["runtime"],
-            auto_runtime=current_problem["auto_runtime"],
-        )
+        # ========================================================
+        # PROCESS EACH VERDICT BRANCH
+        # ========================================================
 
         next_children = []
-        for action_node, explainer_item in zip(
-            current_problem["action_plans"], explainer_results
-        ):
-            explainer_result = explainer_item.get("child_payload")
-            if explainer_result is None:
-                continue
 
-            new_depth = current_problem.get("depth", 0) + 1
-            if new_depth > max_problem_depth:
-                action_node["new_problem"] = None
-                action_node["new_problem_classification"] = "MAX_DEPTH_REACHED"
-                action_node["new_problem_reason"] = (
-                    "A new problem was identified, but the configured maximum problem depth was reached."
-                )
-                continue
-
-            new_problem_id = _next_problem_id(problem_tree)
-            next_auto_runtime += 1
-            child_auto_runtime = next_auto_runtime
-
-            child_node = _build_problem_node(
-                problem_id=new_problem_id,
-                parent_problem_id=current_problem_id,
-                depth=new_depth,
-                problem=explainer_result.problem,
-                runtime=runtime,
-                auto_runtime=child_auto_runtime,
-                source_critic_id=explainer_item["critic_id"],
+        for critic_result, action_node in initial_action_nodes:
+            critique = critic_result.get("critique")
+            verdict = (
+                critique.get("verdict")
+                if isinstance(critique, dict)
+                else None
             )
 
-            action_node["new_problem"] = child_node
-            action_node["new_problem_classification"] = "NEW_PROBLEM"
-            action_node["new_problem_reason"] = explainer_result.reason
+            # ----------------------------------------------------
+            # CRITIC ERROR
+            # ----------------------------------------------------
+            if verdict is None:
+                continue
 
-            next_children.append(
-                (
-                    child_node,
-                    _automatic_problem_history(
-                        base_history=current_history,
-                        child_problem=child_node,
-                        source_critic=next(
-                            (
-                                c["critique"]
-                                for c in result["critic_results"]
-                                if c["critic_id"] == explainer_item["critic_id"]
-                            ),
-                            {},
+            # ----------------------------------------------------
+            # PASS: keep original action unchanged.
+            # ----------------------------------------------------
+            if verdict == "PASS":
+                action_node["status"] = "PASSED"
+                action_node["final_action_plan"] = action_node["action_plan"]
+                continue
+
+            # ----------------------------------------------------
+            # CONDITIONAL: Problem Explainer ONLY here.
+            # ----------------------------------------------------
+            if verdict == "CONDITIONAL":
+                explainer_result = _attach_conditional_result(
+                    action_version=action_node,
+                    current_problem=current_problem,
+                    conditional_critic=critique,
+                    verified_facts=verified_context,
+                    current_history=current_history,
+                    runtime=runtime,
+                    next_auto_runtime=next_auto_runtime,
+                    max_problem_depth=max_problem_depth,
+                    problem_tree=problem_tree,
+                    all_child_problems=all_child_problems,
+                )
+
+                explainer = explainer_result["explainer"]
+                next_auto_runtime = explainer_result["next_auto_runtime"]
+
+                all_logs.append(
+                    {
+                        "agent": "Problem Explainer",
+                        "runtime": current_problem["runtime"],
+                        "auto_runtime": current_problem["auto_runtime"],
+                        "problem_id": current_problem_id,
+                        "critic_id": critic_result["critic_id"],
+                        "prompt": explainer["debug"].llm_prompt,
+                        "output": explainer["debug"].llm_output,
+                        "status": explainer["status"],
+                        "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
+                    }
+                )
+
+                child = explainer_result["child"]
+                if child is not None:
+                    next_children.append(
+                        (
+                            child,
+                            explainer_result["history"],
+                        )
+                    )
+
+                continue
+
+            # ----------------------------------------------------
+            # FAIL: repair this ONE action with Advisor, then re-critic.
+            # ----------------------------------------------------
+            if verdict == "FAIL":
+                action_node["status"] = "REPAIRING"
+                current_action = action_node["action_plan"]
+                current_critic = critique
+                repair_history = []
+                previous_version = action_node
+                repaired = False
+
+                for attempt_number in range(
+                    1,
+                    max_fail_repair_attempts + 1,
+                ):
+                    action_node["repair_attempts"] = attempt_number - 1
+
+                    # Check the bound BEFORE making the Advisor call.
+                    if attempt_number > max_fail_repair_attempts:
+                        break
+
+                    # --------------------------------------------
+                    # AUTO ADVISOR: ONE REPAIRED ACTION
+                    # --------------------------------------------
+                    repair_result = repair_failed_action(
+                        parent_problem=current_problem,
+                        failed_action=current_action,
+                        critic_feedback=current_critic,
+                        verified_facts=verified_context,
+                        repair_history=repair_history,
+                        runtime=current_problem["runtime"],
+                        auto_runtime=current_problem["auto_runtime"],
+                        problem_id=current_problem_id,
+                    )
+
+                    repair_record = {
+                        "attempt": attempt_number,
+                        "failed_action": current_action,
+                        "critic_feedback": current_critic,
+                        "status": repair_result["status"],
+                        "repaired_action": None,
+                        "critic_id": None,
+                        "critic": None,
+                    }
+
+                    all_logs.append(
+                        {
+                            "agent": "Failed Action Repair Advisor",
+                            "runtime": current_problem["runtime"],
+                            "auto_runtime": current_problem["auto_runtime"],
+                            "problem_id": current_problem_id,
+                            "repair_attempt": attempt_number,
+                            "prompt": repair_result["debug"].llm_prompt,
+                            "output": repair_result["debug"].llm_output,
+                            "status": repair_result["status"],
+                            "quota": get_quota_snapshot("gemma-4-31b-it"),
+                        }
+                    )
+
+                    # --------------------------------------------
+                    # REPAIR LLM FAILED
+                    # --------------------------------------------
+                    if repair_result["result"] is None:
+                        repair_record["error"] = repair_result["debug"].llm_output
+                        repair_history.append(repair_record)
+                        action_node["repair_attempt_log"] = list(repair_history)
+                        continue
+
+                    repaired_action = repair_result["result"].model_dump()
+                    repair_record["repaired_action"] = repaired_action
+
+                    # --------------------------------------------
+                    # RE-CRITIC THE REPAIRED ACTION
+                    # --------------------------------------------
+                    (
+                        repaired_critic_result,
+                        repaired_critic_record,
+                        repaired_critic_log,
+                        critic_id_counter,
+                    ) = _critic_repaired_action(
+                        action_item=repaired_action,
+                        parent_strategy_context=advisor_strategy,
+                        verified_context=verified_context,
+                        problem_id=current_problem_id,
+                        runtime=current_problem["runtime"],
+                        auto_runtime=current_problem["auto_runtime"],
+                        critic_id_counter=critic_id_counter,
+                        active_critics=active_critics,
+                    )
+
+                    all_critic_results.append(repaired_critic_result)
+                    all_critic_records.append(repaired_critic_record)
+                    all_logs.append(repaired_critic_log)
+
+                    revised_critique = repaired_critic_result.get("critique")
+                    revised_verdict = (
+                        revised_critique.get("verdict")
+                        if isinstance(revised_critique, dict)
+                        else None
+                    )
+
+                    revision = {
+                        "attempt": attempt_number,
+                        "action_plan": repaired_action,
+                        "critic_id": repaired_critic_result["critic_id"],
+                        "verdict": revised_verdict,
+                        "verdict_reason": (
+                            revised_critique.get("verdict_reason")
+                            if isinstance(revised_critique, dict)
+                            else None
                         ),
-                        verified_facts=current_verified_facts,
-                    ),
-                )
-            )
-            all_child_problems.append(child_node)
+                        "status": "REPAIR_FAILED",
+                        "new_problem": None,
+                        "new_problem_classification": None,
+                        "new_problem_reason": None,
+                        "next_revision": None,
+                        "repair_record": repair_record,
+                    }
 
-        current_problem["solution"] = systematic_advice.model_dump()
+                    _append_repair_revision(previous_version, revision)
+                    repair_history.append(repair_record | {
+                        "critic_id": repaired_critic_result["critic_id"],
+                        "critic": revised_critique,
+                        "verdict": revised_verdict,
+                    })
+                    action_node["repair_attempt_log"] = list(repair_history)
+
+                    action_node["repair_attempts"] = attempt_number
+
+                    # --------------------------------------------
+                    # REPAIRED ACTION PASSES
+                    # --------------------------------------------
+                    if revised_verdict == "PASS":
+                        revision["status"] = "PASSED"
+                        action_node["status"] = "REPAIRED_AND_PASSED"
+                        action_node["final_action_plan"] = repaired_action
+                        repaired = True
+                        break
+
+                    # --------------------------------------------
+                    # REPAIRED ACTION IS CONDITIONAL
+                    # --------------------------------------------
+                    if revised_verdict == "CONDITIONAL":
+                        explainer_result = _attach_conditional_result(
+                            action_version=revision,
+                            current_problem=current_problem,
+                            conditional_critic=revised_critique,
+                            verified_facts=verified_context,
+                            current_history=current_history,
+                            runtime=runtime,
+                            next_auto_runtime=next_auto_runtime,
+                            max_problem_depth=max_problem_depth,
+                            problem_tree=problem_tree,
+                            all_child_problems=all_child_problems,
+                        )
+
+                        explainer = explainer_result["explainer"]
+                        next_auto_runtime = explainer_result["next_auto_runtime"]
+
+                        all_logs.append(
+                            {
+                                "agent": "Problem Explainer",
+                                "runtime": current_problem["runtime"],
+                                "auto_runtime": current_problem["auto_runtime"],
+                                "problem_id": current_problem_id,
+                                "critic_id": repaired_critic_result["critic_id"],
+                                "repair_attempt": attempt_number,
+                                "prompt": explainer["debug"].llm_prompt,
+                                "output": explainer["debug"].llm_output,
+                                "status": explainer["status"],
+                                "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
+                            }
+                        )
+
+                        child = explainer_result["child"]
+                        if child is not None:
+                            next_children.append(
+                                (
+                                    child,
+                                    explainer_result["history"],
+                                )
+                            )
+
+                        revision["status"] = (
+                            "CONDITIONAL_NEW_PROBLEM"
+                            if child is not None
+                            else "CONDITIONAL_NO_NEW_PROBLEM"
+                        )
+                        action_node["status"] = "REPAIRED_CONDITIONAL"
+                        action_node["final_action_plan"] = repaired_action
+                        repaired = True
+                        break
+
+                    # --------------------------------------------
+                    # REPAIRED ACTION IS STILL FAIL
+                    # --------------------------------------------
+                    if revised_verdict == "FAIL":
+                        revision["status"] = "REPAIR_FAILED"
+                        previous_version = revision
+                        current_action = repaired_action
+                        current_critic = revised_critique
+                        continue
+
+                    # Critic error: consume this attempt, log it, and try again.
+                    revision["status"] = "CRITIC_ERROR"
+                    previous_version = revision
+                    current_action = repaired_action
+                    current_critic = revised_critique or {
+                        "verdict": None,
+                        "verdict_reason": repaired_critic_result.get("error"),
+                    }
+
+                # ------------------------------------------------
+                # REPAIR LIMIT REACHED / EXHAUSTED
+                # ------------------------------------------------
+                if not repaired:
+                    action_node["status"] = "REJECTED"
+                    if action_node.get("repair_chain") is not None:
+                        cursor = action_node["repair_chain"]
+                        while cursor.get("next_revision") is not None:
+                            cursor = cursor["next_revision"]
+                        cursor["status"] = "REJECTED"
+                    action_node["repair_rejection_reason"] = (
+                        "The failed action exceeded the configured maximum number "
+                        "of Advisor repair attempts and was not accepted."
+                    )
+                    action_node["final_action_plan"] = None
+
+        # Save the original strategy while action nodes hold branch outcomes.
+        current_problem["solution"] = advisor_strategy
         current_problem["status"] = (
             "WAITING_FOR_CHILDREN" if next_children else "SOLVED"
         )
 
-        # Append all siblings only after ALL current-level explainers completed.
+        # BFS barrier: all initial critics plus all fail-repair chains and
+        # conditional explainers for this problem finish before children queue.
         for child in next_children:
             queue.append(child)
 
-    # If BFS has exhausted, every queued problem has completed.
-    # Mark ancestors with no unresolved children as solved.
+    # ============================================================
+    # FINALIZE TREE STATUSES
+    # ============================================================
+
     def finalize(node):
         unresolved = False
         for action in node.get("action_plans", []):
-            child = action.get("new_problem")
-            if child:
+            for child in _iter_child_nodes(action):
                 finalize(child)
-                if child.get("status") not in {"SOLVED", "ERROR", "WAITING_FOR_USER"}:
+                if child.get("status") not in {
+                    "SOLVED",
+                    "ERROR",
+                    "WAITING_FOR_USER",
+                }:
                     unresolved = True
         if node.get("status") == "WAITING_FOR_CHILDREN" and not unresolved:
             node["status"] = "SOLVED"
@@ -579,8 +1001,6 @@ def run_workflow(
     for root_node in problem_tree:
         finalize(root_node)
 
-    # The last result provides the normal UI response. Root response is used
-    # for the human turn because child problem solving is automatic.
     if human_turn_result is None:
         human_turn_result = {
             "response": "",

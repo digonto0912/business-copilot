@@ -1,5 +1,7 @@
 # agent_workflow.py
 
+import json
+
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.output_parsers import (
     StrOutputParser,
@@ -15,6 +17,9 @@ from agents import (
 )
 
 from schemas.verified_facts_schema import VerifiedFacts
+from schemas.systematic_advice_schema import ActionPlanItem
+from prompts.fail_action_repair_prompt import get_fail_action_repair_prompt
+from llm import llm_gemma_4_31b_it
 from rate_limit import gemini_31_flash_lite_quota, gemma_4_31b_quota, get_quota_snapshot
 
 
@@ -39,6 +44,81 @@ verified_facts_chain = verified_facts_agent | verified_facts_parser
 
 
 systematic_advice_converter_chain = systematic_advice_converter
+
+
+# ============================================================
+# FAILED ACTION REPAIR
+# ============================================================
+
+fail_action_repair_chain = (
+    get_fail_action_repair_prompt
+    | llm_gemma_4_31b_it.with_structured_output(ActionPlanItem)
+)
+
+
+def repair_failed_action(
+    parent_problem,
+    failed_action,
+    critic_feedback,
+    verified_facts,
+    repair_history=None,
+    runtime=1,
+    auto_runtime=0,
+    problem_id=None,
+):
+    """Ask the Advisor to repair ONE failed action into ONE action plan."""
+
+    debug = LLMDebugHandler()
+
+    if repair_history is None:
+        repair_history = []
+
+    try:
+        repaired_action = fail_action_repair_chain.with_config(
+            callbacks=[debug, gemma_4_31b_quota]
+        ).invoke(
+            {
+                "parent_problem": json.dumps(
+                    parent_problem,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                "failed_action": json.dumps(
+                    failed_action,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                "critic_feedback": json.dumps(
+                    critic_feedback,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                "verified_facts": json.dumps(
+                    verified_facts,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                "repair_history": json.dumps(
+                    repair_history,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            }
+        )
+
+        return {
+            "result": repaired_action,
+            "debug": debug,
+            "status": "SUCCESS",
+        }
+
+    except Exception as e:
+        debug.llm_output = {"error": str(e)}
+        return {
+            "result": None,
+            "debug": debug,
+            "status": "ERROR",
+        }
 
 
 # ============================================================

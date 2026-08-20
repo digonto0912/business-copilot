@@ -9,7 +9,12 @@ from agent_workflow import (
     repair_failed_action,
     run_core_workflow,
 )
-from agents import problem_explainer_agent, problem_identifier_agent, CriticAgent
+from agents import (
+    problem_explainer_agent,
+    problem_identifier_agent,
+    CriticAgent,
+    suggestions_synchronizer_agent,
+)
 from rate_limit import gemini_31_flash_lite_quota, get_quota_snapshot
 
 
@@ -462,6 +467,42 @@ def _append_repair_revision(parent_action, revision):
     while cursor.get("next_revision") is not None:
         cursor = cursor["next_revision"]
     cursor["next_revision"] = revision
+
+
+def synchronize_suggestions(problem_tree, critic_results):
+    """Create the final user-facing response from the completed tree."""
+    debug = RecursionDebugHandler()
+    try:
+        # Reuse the agent's prompt/chain while attaching the same debug callback
+        # used by the rest of the recursion controller.
+        output = suggestions_synchronizer_agent.chain.with_config(
+            callbacks=[debug, gemini_31_flash_lite_quota]
+        ).invoke(
+            {
+                "problem_tree": json.dumps(
+                    problem_tree,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                "critic_results": json.dumps(
+                    critic_results,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            }
+        )
+        return {
+            "result": output,
+            "debug": debug,
+            "status": "SUCCESS",
+        }
+    except Exception as e:
+        debug.llm_output = {"error": str(e)}
+        return {
+            "result": None,
+            "debug": debug,
+            "status": "ERROR",
+        }
 
 
 # ============================================================
@@ -1027,8 +1068,36 @@ def run_workflow(
             "systematic_advice": None,
         }
 
+    # The core workflow may have produced the first Advisor response, but that
+    # response is intentionally NOT the final user-facing answer. Once the BFS
+    # finishes, synchronize the entire completed tree into one coherent answer.
+    final_response = human_turn_result.get("response", "")
+    synchronizer_log = None
+
+    if not human_turn_result.get("needs_input") and problem_tree:
+        synchronizer = synchronize_suggestions(
+            problem_tree=problem_tree,
+            critic_results=all_critic_results,
+        )
+
+        synchronizer_log = {
+            "agent": "Suggestions Synchronizer",
+            "runtime": runtime,
+            "auto_runtime": current_auto_runtime,
+            "problem_id": problem_tree[0].get("problem_id"),
+            "prompt": synchronizer["debug"].llm_prompt,
+            "output": synchronizer["debug"].llm_output,
+            "status": synchronizer["status"],
+            "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
+        }
+        all_logs.append(synchronizer_log)
+
+        if synchronizer["result"]:
+            final_response = synchronizer["result"]
+
     return {
         **human_turn_result,
+        "response": final_response,
         "logs": all_logs,
         "critic_results": all_critic_results,
         "critic_records": all_critic_records,

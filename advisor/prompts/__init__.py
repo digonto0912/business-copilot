@@ -5,3 +5,4 @@ from .systematic_advice_converter_prompt import get_systematic_advice_converter_
 from .critic_prompt import get_critic_prompt
 from .problem_identifier_prompt import get_problem_identifier_prompt
 from .problem_explainer_prompt import get_problem_explainer_prompt
+from .suggestions_synchronizer_prompt import get_suggestions_synchronizer_prompt

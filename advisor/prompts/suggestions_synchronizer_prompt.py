@@ -31,11 +31,8 @@ It determines:
 - repair chains
 - final surviving revisions
 
-CRITIC_RESULTS is supplementary only. Use it only to enrich an EXISTING tree
-node when information needed to explain that node is absent from the tree.
-NEVER create a problem, action, repair, verdict, or recommendation solely
-because something appears in CRITIC_RESULTS.
-
+There is no separate critic-results source for this stage. All evaluation
+information needed for rendering must come from the supplied tree itself.
 Do not import information from examples, previous sessions, generic knowledge,
 or your own reasoning.
 
@@ -156,7 +153,7 @@ Before producing the final response, mentally verify:
 3. Every child problem was rendered under the exact action that created it.
 4. Every repair revision was rendered in order.
 5. No sibling action/problem was dropped.
-6. No action/problem was created from CRITIC_RESULTS alone.
+6. No action/problem was created outside the supplied tree.
 7. No unsupported strategy was invented.
 
 If the tree contains N problem nodes and M action nodes, the response should
@@ -196,13 +193,11 @@ suggestions_synchronizer_prompt = ChatPromptTemplate.from_messages([
 COMPLETED_PROBLEM_TREE (AUTHORITATIVE STRUCTURE):
 {problem_tree}
 
-CRITIC_RESULTS (SUPPLEMENTARY ONLY; NEVER CREATE NEW TREE NODES FROM THIS):
-{critic_results}
-
 Render the COMPLETE tree exhaustively from root to every descendant and every
-sibling action. Preserve all action execution details, evaluations, child
-problems, and repair chains. Then provide the concise Final Strategic Picture.
-Do not return JSON. Return only the final human-readable answer.
+sibling action using only the supplied tree. Preserve all action execution
+details, evaluations, child problems, and repair chains. Then provide the
+concise Final Strategic Picture. Do not return JSON. Return only the final
+human-readable answer.
 """,
     ),
 ])

@@ -6,3 +6,4 @@ from .critic_prompt import get_critic_prompt
 from .problem_identifier_prompt import get_problem_identifier_prompt
 from .problem_explainer_prompt import get_problem_explainer_prompt
 from .suggestions_synchronizer_prompt import get_suggestions_synchronizer_prompt
+from .suggestions_decision_synchronizer_prompt import get_suggestions_decision_synchronizer_prompt

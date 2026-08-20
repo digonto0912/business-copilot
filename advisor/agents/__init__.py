@@ -6,3 +6,7 @@ from .critic_agent import CriticAgent
 from .problem_identifier_agent import problem_identifier_agent
 from .problem_explainer_agent import problem_explainer_agent
 from .suggestions_synchronizer_agent import SuggestionsSynchronizerAgent, suggestions_synchronizer_agent
+from .suggestions_decision_synchronizer_agent import (
+    SuggestionsDecisionSynchronizerAgent,
+    suggestions_decision_synchronizer_agent,
+)

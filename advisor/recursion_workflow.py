@@ -14,6 +14,7 @@ from agents import (
     problem_identifier_agent,
     CriticAgent,
     suggestions_synchronizer_agent,
+    suggestions_decision_synchronizer_agent,
 )
 from rate_limit import gemini_31_flash_lite_quota, get_quota_snapshot
 
@@ -469,12 +470,10 @@ def _append_repair_revision(parent_action, revision):
     cursor["next_revision"] = revision
 
 
-def synchronize_suggestions(problem_tree, critic_results):
-    """Create the final user-facing response from the completed tree."""
+def synchronize_suggestions(problem_tree):
+    """Create the exhaustive human-readable response from the completed tree."""
     debug = RecursionDebugHandler()
     try:
-        # Reuse the agent's prompt/chain while attaching the same debug callback
-        # used by the rest of the recursion controller.
         output = suggestions_synchronizer_agent.chain.with_config(
             callbacks=[debug, gemini_31_flash_lite_quota]
         ).invoke(
@@ -484,11 +483,36 @@ def synchronize_suggestions(problem_tree, critic_results):
                     indent=2,
                     ensure_ascii=False,
                 ),
-                "critic_results": json.dumps(
-                    critic_results,
+            }
+        )
+        return {
+            "result": output,
+            "debug": debug,
+            "status": "SUCCESS",
+        }
+    except Exception as e:
+        debug.llm_output = {"error": str(e)}
+        return {
+            "result": None,
+            "debug": debug,
+            "status": "ERROR",
+        }
+
+
+def synchronize_final_decisions(problem_tree, first_sync_response):
+    """Compress the complete tree into final per-action decisions."""
+    debug = RecursionDebugHandler()
+    try:
+        output = suggestions_decision_synchronizer_agent.chain.with_config(
+            callbacks=[debug, gemini_31_flash_lite_quota]
+        ).invoke(
+            {
+                "problem_tree": json.dumps(
+                    problem_tree,
                     indent=2,
                     ensure_ascii=False,
                 ),
+                "first_sync_response": first_sync_response,
             }
         )
         return {
@@ -1073,12 +1097,11 @@ def run_workflow(
     # finishes, synchronize the entire completed tree into one coherent answer.
     final_response = human_turn_result.get("response", "")
     synchronizer_log = None
+    decision_synchronizer_log = None
 
     if not human_turn_result.get("needs_input") and problem_tree:
-        synchronizer = synchronize_suggestions(
-            problem_tree=problem_tree,
-            critic_results=all_critic_results,
-        )
+        # Stage 1: exhaustive recursive tree rendering.
+        synchronizer = synchronize_suggestions(problem_tree=problem_tree)
 
         synchronizer_log = {
             "agent": "Suggestions Synchronizer",
@@ -1092,8 +1115,33 @@ def run_workflow(
         }
         all_logs.append(synchronizer_log)
 
-        if synchronizer["result"]:
-            final_response = synchronizer["result"]
+        first_sync_response = synchronizer.get("result")
+        if first_sync_response:
+            # Stage 2: compress each action to its final PASS / CONDITIONAL /
+            # REJECTED decision without repeating repair history.
+            decision_synchronizer = synchronize_final_decisions(
+                problem_tree=problem_tree,
+                first_sync_response=first_sync_response,
+            )
+
+            decision_synchronizer_log = {
+                "agent": "Suggestions Decision Synchronizer",
+                "runtime": runtime,
+                "auto_runtime": current_auto_runtime,
+                "problem_id": problem_tree[0].get("problem_id"),
+                "prompt": decision_synchronizer["debug"].llm_prompt,
+                "output": decision_synchronizer["debug"].llm_output,
+                "status": decision_synchronizer["status"],
+                "quota": get_quota_snapshot("gemini-3.1-flash-lite"),
+            }
+            all_logs.append(decision_synchronizer_log)
+
+            if decision_synchronizer.get("result"):
+                final_response = decision_synchronizer["result"]
+            else:
+                # Preserve the complete first synchronization if compression
+                # fails; never silently fall back to the original Advisor answer.
+                final_response = first_sync_response
 
     return {
         **human_turn_result,
